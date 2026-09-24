@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 import threading
-import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -18,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from support import BlockingCloseHost, BlockingHost, make_settings
+from support import BlockingCloseHost, BlockingHost, make_settings, wait_until
 from terminald.api import create_app
 from terminald.protocol import PROTOCOL_VERSION, frames
 from terminald.protocol.messages import (
@@ -52,15 +51,6 @@ def connect(client: TestClient, **headers: str) -> Any:
     """
     merged = {"host": "127.0.0.1", **headers}
     return client.websocket_connect("/ws", headers=merged)
-
-
-def wait_until(predicate: Any, timeout: float = 3.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.01)
-    raise AssertionError("等待条件超时")
 
 
 # --------------------------------------------------------------- REST
@@ -342,8 +332,9 @@ def test_reconnect_resumes_from_client_offset(client: TestClient, app: Any) -> N
     session_id = client.post("/api/sessions", json={"name": "resume"}).json()["id"]
     session = hub.get_session(session_id)
     session.host.feed(b"before")
-    wait_until(lambda: session.journal.end_offset == 6)
-    time.sleep(0.1)
+    # 日志偏移就是栅栏：追平到 6 字节即可。无需在栅栏之后再等一段时间——
+    # `_ingest_output` 是一个原子步，所以偏移可观察时推送决策也已发生。
+    wait_until(lambda: session.journal.end_offset == 6, what="输出并入日志（6 字节）")
 
     with connect(client) as ws:
         ws.send_text(dump(Hello()))

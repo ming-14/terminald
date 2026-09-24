@@ -10,6 +10,9 @@
 2. `Ack` 一到就继续推（`on_drained` 管不到这一层：它不知道客户端渲染到哪）；
 3. 对**不会 ack** 的客户端窗口不生效——保持旧行为，而不是停在一个永远解不开的窗口上；
 4. 窗口卡住的客户端不会静默死掉：游标迟早落到日志裁剪点之前，于是走 `Behind` + 重建。
+
+驱动方式与时序无关：每一步都等到一个**可观察的栅栏**（`feed()` / `drain_until_caught_up()`），
+不用“等一会儿再看”，所以这些用例在机器被抢占时也不会变成另一条结论。
 """
 
 from __future__ import annotations
@@ -17,7 +20,15 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from support import client_of, make_endpoint, make_settings, settle, wait_for
+from support import (
+    Endpoint,
+    client_of,
+    feed,
+    make_endpoint,
+    make_settings,
+    wait_for,
+)
+from terminald.core import Client
 from terminald.protocol.messages import Ack, Attach
 from terminald.runtime import make_host_factory
 from terminald.service.hub import Hub
@@ -39,16 +50,27 @@ def settings(**overrides: object):
     return make_settings(**base)
 
 
-async def flood(hub: Hub, session_id: str, total: int, *, drains: bool = True) -> None:
-    """持续产出；`drains` 表示“socket 照单全收”。"""
-    host = hub.get_session(session_id).host
-    assert host is not None
+async def flood(hub: Hub, session_id: str, total: int) -> None:
+    """持续产出；每一步都等到输出真正并入日志（栅栏，不是定时器）。"""
     produced = 0
     step = 16 * 1024
     while produced < total:
-        host.feed(b"x" * step)
+        await feed(hub, session_id, b"x" * step)
         produced += step
-        await settle(0.02)
+
+
+async def prove_acking(hub: Hub, endpoint: Endpoint, session_id: str) -> Client:
+    """让该客户端“证明自己会 ack”，并返回它在 Hub 里的记录。
+
+    窗口只对证明过的客户端生效（`Client.ack_seen`）——ack 必须真的**推进**过游标才算数，
+    所以这是所有窗口用例共同的前置条件；写成一处，前置条件本身也只有一份。
+    """
+    record = client_of(hub, endpoint.client_id)
+    await feed(hub, session_id, b"y" * (4 * CHUNK))
+    endpoint.drain()  # socket 照单全收（但客户端还不 ack）
+    await hub.handle_message(endpoint.client_id, Ack(offset=record.next_push_offset))
+    assert record.ack_seen is True, "前置条件没建立：这个客户端还没证明会 ack"
+    return record
 
 
 @pytest.mark.asyncio
@@ -65,20 +87,11 @@ async def test_live_push_stops_at_the_window_and_resumes_on_ack() -> None:
         await hub.handle_message("a", Ack(offset=0))
         record = client_of(hub, "a")
         assert record.ack_seen is False, "ack 没有真正推进时不算证明"
-        host = hub.get_session(info.id).host
-        assert host is not None
-        host.feed(b"y" * (4 * CHUNK))
-        await settle(0.2)
-        endpoint.drain()
-        await hub.handle_message("a", Ack(offset=record.next_push_offset))
-        assert record.ack_seen is True
+        record = await prove_acking(hub, endpoint, info.id)
 
         # 开始灌：socket 每次都排空（照单全收），但**不 ack**
-        host = hub.get_session(info.id).host
-        assert host is not None
         for _ in range(8):
-            host.feed(b"z" * (64 * 1024))
-            await settle(0.05)
+            await feed(hub, info.id, b"z" * (64 * 1024))
             endpoint.drain()
 
         pushed = record.next_push_offset - record.acked_offset
@@ -109,9 +122,7 @@ async def test_client_that_never_acks_is_not_throttled() -> None:
 
         total = 256 * 1024
         await flood(hub, info.id, total)
-        for _ in range(20):
-            endpoint.drain()
-            await settle(0.03)
+        endpoint.drain_until_caught_up(hub.get_session(info.id))
 
         record = client_of(hub, "a")
         assert record.ack_seen is False
@@ -132,19 +143,12 @@ async def test_window_stalled_client_escalates_to_behind_and_rebuild() -> None:
         await hub.handle_message("a", Attach(session=info.id))
         endpoint.drain_until_quiet()
 
-        record = client_of(hub, "a")
-        host = hub.get_session(info.id).host
-        assert host is not None
         # 证明会 ack → 窗口生效
-        host.feed(b"y" * (4 * CHUNK))
-        await settle(0.2)
-        endpoint.drain()
-        await hub.handle_message("a", Ack(offset=record.next_push_offset))
+        record = await prove_acking(hub, endpoint, info.id)
 
         # 从这里开始既不 ack 也不让 socket 排空过快：输出远超日志预算
         for _ in range(60):
-            host.feed(b"z" * (32 * 1024))
-            await settle(0.02)
+            await feed(hub, info.id, b"z" * (32 * 1024))
 
         await wait_for(lambda: record.behind_notified, timeout=10)
         endpoint.drain_until_quiet()
@@ -169,23 +173,15 @@ async def test_ack_beyond_what_was_sent_cannot_open_the_window() -> None:
         await hub.handle_message("a", Attach(session=info.id))
         endpoint.drain_until_quiet()
 
-        record = client_of(hub, "a")
-        host = hub.get_session(info.id).host
-        assert host is not None
         # 先让它证明自己会 ack（窗口只对这种客户端生效）
-        host.feed(b"y" * (4 * CHUNK))
-        await settle(0.2)
-        endpoint.drain()
-        await hub.handle_message("a", Ack(offset=record.next_push_offset))
-        assert record.ack_seen is True
+        record = await prove_acking(hub, endpoint, info.id)
         sent_to = record.next_push_offset
 
         await hub.handle_message("a", Ack(offset=sent_to + 16 * 1024 * 1024))
         assert record.acked_offset == sent_to, "越界的 ack 不该被记账"
 
         for _ in range(8):
-            host.feed(b"z" * (64 * 1024))
-            await settle(0.05)
+            await feed(hub, info.id, b"z" * (64 * 1024))
             endpoint.drain()
 
         pushed = record.next_push_offset - record.acked_offset

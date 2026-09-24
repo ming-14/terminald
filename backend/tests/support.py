@@ -7,6 +7,23 @@
 一个客户端收到的 OUTPUT 帧必须首尾相接、无空洞、无重复（全新客户端从 0 起，
 续传客户端从它自报的断点起）。多客户端“内容完全同步”最终就是这条不变量在所有
 客户端上同时成立。
+
+## 同步纪律：不睡，只等栅栏
+
+这个模块里**没有** `settle()` 这类固定睡眠，也不该再有。固定睡眠有两个无法修复的
+缺陷：机器一忙它必然假红（等到的不是事件，是时间）；而失败信息为零（`assert` 只会说
+“条件不成立”，说不清是“没发生”还是“还没发生”）。
+
+取而代之的是四个**具名栅栏**，每个都对应管道上真实存在的可观察点：
+
+- `feed()` —— 输出栅栏：喂进去的字节已并入日志（因而也已推给所有订阅者）；
+- `writes_drained()` —— 写栅栏：此前提交给写线程的字节已真正落到宿主上；
+- `wait_for()` —— 通用条件等待，超时会指出判定点的源码位置；
+- `turn()` —— 让事件循环把手头排队的回调跑完一轮（“已经跑过”而非“过了多久”）。
+
+「否定断言」（“不该发生 X”）只有在**先证明“该发生的都发生完了”**之后才有意义，
+否则它会在什么都没发生时也变绿——这类空断言是比假红更坏的东西。各条栅栏为什么成立，
+见它们各自的 docstring；这些理由不是注释，而是被 `test_sync_discipline.py` 机器化钉住的。
 """
 
 from __future__ import annotations
@@ -21,16 +38,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from terminald.config import Settings
-from terminald.core import Client, SessionSpec
+from terminald.core import Client, Session, SessionSpec
 from terminald.protocol import frames
 from terminald.protocol.frames import FrameTag
 from terminald.protocol.messages import ServerMessage, parse_server_message
 from terminald.runtime import make_host_factory
 from terminald.runtime.fake_host import FakeHost
+from terminald.runtime.runner import SessionRunner
 from terminald.service.hub import Hub
-
-#: 会话启动后等待读线程把首批输出交给事件循环
-SETTLE = 0.15
 
 
 def make_settings(**overrides: object) -> Settings:
@@ -61,19 +76,54 @@ async def hub_context(**overrides: object) -> AsyncIterator[Hub]:
         await instance.stop()
 
 
-async def settle(seconds: float = SETTLE) -> None:
-    """让出时间片，等待事件循环与后台线程完成一轮传递。"""
-    await asyncio.sleep(seconds)
+async def turn() -> None:
+    """让事件循环把**此刻已排队**的回调跑完一轮，然后回来。
+
+    语义是“已经跑过一轮”，不是“过了一段时间”，所以它没有固定睡眠的假红问题：
+    `call_soon` 是 FIFO，我们自己那个标记跑完就说明排在它之前的东西都跑过了。
+
+    它也不能当栅栏用——只能用来断言“某个任务确实已经执行过至少一步”（否则“任务未完成”
+    这类否定断言会因为任务压根还没被调度而变得恒真）。
+    """
+    loop = asyncio.get_running_loop()
+    done: asyncio.Future[None] = loop.create_future()
+    loop.call_soon(done.set_result, None)
+    await done
 
 
-async def wait_for(predicate: Callable[[], bool], timeout: float = 3.0) -> None:
-    """轮询等待条件成立（比固定 sleep 稳，失败时仍然是有界的）。"""
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
+def _where(predicate: Callable[[], object]) -> str:
+    """判定点的源码位置（`文件:行`）。
+
+    超时信息里最有价值的是**哪一行断言的前提没等到**；只写“等待条件超时”等于让人
+    从零开始排查。lambda 一般在调用点同一行定义，所以行号几乎总是指向那一处。
+    """
+    code = getattr(predicate, "__code__", None)
+    if code is None:
+        return "（无法定位的判定点）"
+    return f"{os.path.basename(code.co_filename)}:{code.co_firstlineno}"
+
+
+async def wait_for(predicate: Callable[[], bool], timeout: float = 3.0, what: str = "条件") -> None:
+    """轮询等待条件成立；超时则报出**判定点位置**与已等待时长。
+
+    间隔只是“多久检查一次”，不承载正确性：先连续让出时间片（同一轮事件循环里就能
+    成立的条件在微秒级返回），再退避到 10ms（等的是别的线程时可观测量时，避免空转）。
+    所以它既不是睡眠，也不会因为机器忙而漏掉一个**已经**成立的条件。
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    deadline = started + timeout
+    delay = 0.0
+    while True:
         if predicate():
             return
-        await asyncio.sleep(0.01)
-    raise AssertionError("等待条件超时")
+        if loop.time() >= deadline:
+            raise AssertionError(
+                f"等待{what}超时（已等 {loop.time() - started:.2f}s / 上限 {timeout:.2f}s）"
+                f"，判定点 {_where(predicate)}"
+            )
+        await asyncio.sleep(delay)
+        delay = min(0.01, max(0.0005, delay * 2))
 
 
 @dataclass
@@ -125,12 +175,36 @@ class Endpoint:
             self.hub.on_drained(self.client_id)
 
     def drain_until_quiet(self, rounds: int = 4) -> None:
-        """反复排空直到没有新负载（补流可能因水位上限分多轮）。"""
+        """反复排空直到没有新负载（补流可能因水位上限分多轮）。
+
+        注意：它是**同步**的，所以给不出事件循环的任何一圈。服务端那侧还在飞的效果
+        （典型是写线程经 `call_soon_threadsafe` 转回来的放行、`on_drained` 回调）
+        不会因为你循环排空几轮就出现——那种情况下先用一个条件栅栏（例如
+        `wait_for(lambda: client_of(hub, cid).input_held is False)`）等到效果确已发生，
+        再来排空。否则它会在机器忙时安静地变成“什么都没收到”（实测 10 轮里红 2 轮）。
+        """
         for _ in range(rounds):
             before = len(self.stream) + len(self.control) + len(self.snapshots)
             self.drain()
             after = len(self.stream) + len(self.control) + len(self.snapshots)
             if before == after:
+                return
+
+    def drain_until_caught_up(self, session: Session, *, rounds: int = 64) -> None:
+        """反复排空，直到该客户端把日志里缺的字节补齐（或确定补不动了）。
+
+        补流受发送水位限制，每轮只能推进到水位为止；而**水位一空就由 `on_drained`
+        同步再推一轮**，所以“排空 → 再排空”是确定的，不需要在两轮之间睡一下。
+
+        `rounds` 是给“本来就应该卡住”的用例留的出口（窗口卡住、游标落到裁剪点之前）：
+        那时两轮之间不再有任何变化，于是提前返回，由调用方去断言**为什么**卡住。
+        """
+        for _ in range(rounds):
+            before = self.next_offset
+            self.drain()
+            if self.next_offset >= session.journal.end_offset:
+                return
+            if self.next_offset == before and not self.hub.has_output(self.client_id):
                 return
 
     # ------------------------------------------------------------ 断言辅助
@@ -229,13 +303,17 @@ def process_alive(pid: int) -> bool:
 
 
 def wait_until(condition: Callable[[], bool], timeout: float = 3.0, what: str = "条件") -> None:
-    """等到条件成立（同步上下文用）。"""
-    deadline = time.monotonic() + timeout
+    """等到条件成立（同步上下文用；间隔同样只是“多久检查一次”）。"""
+    started = time.monotonic()
+    deadline = started + timeout
     while time.monotonic() < deadline:
         if condition():
             return
         time.sleep(0.01)
-    raise AssertionError(f"等待{what}超时")
+    raise AssertionError(
+        f"等待{what}超时（已等 {time.monotonic() - started:.2f}s / 上限 {timeout:.2f}s）"
+        f"，判定点 {_where(condition)}"
+    )
 
 
 def host_of(hub: Hub, session_id: str) -> FakeHost:
@@ -250,6 +328,53 @@ def client_of(hub: Hub, client_id: str) -> Client:
     return hub._clients[client_id]
 
 
+def runner_of(hub: Hub, session_id: str) -> SessionRunner:
+    """取出会话的 I/O 线程组（测试需要观察/驱动写线程时用）。"""
+    runner = hub._runners.get(session_id)
+    assert runner is not None, "该会话没有运行中的 I/O 线程组"
+    return runner
+
+
+async def feed(hub: Hub, session_id: str, data: bytes) -> None:
+    """**输出栅栏**：把 `data` 当作子进程输出喂进去，并等到它并入日志。
+
+    它同时就是“已推给所有订阅者”的栅栏，因为 `Hub._ingest_output` 是**一段没有 await
+    的原子步**（喂模型 → 追加日志 → 裁剪 → 按游标推给每个订阅者）。事件循环不可能在
+    半路把控制权交给别的任务，所以“日志偏移已推进”这件事一旦可观察，该步的全部副作用
+    就已经发生完毕——这正是「否定断言不需要睡眠」的依据。
+
+    这条理由不是注释，而是被 `test_sync_discipline.py` 机器化钉住的：`_ingest_output`
+    里一旦出现 await（例如把推送改成“稍后再说”），本函数就不再是完整栅栏，那条测试会红。
+    """
+    session = hub.get_session(session_id)
+    target = session.journal.end_offset + len(data)
+    host_of(hub, session_id).feed(data)
+    await wait_for(
+        lambda: session.journal.end_offset == target,
+        what=f"输出并入日志（目标 offset={target}）",
+    )
+
+
+async def writes_drained(hub: Hub, session_id: str) -> None:
+    """**写入栅栏**：等到“此刻之前提交给写线程的字节”全部落到宿主上。
+
+    为什么需要它：写线程是异步的，所以「应用不该收到焦点序列」这类**否定断言**在完全
+    不等待时是**空的**——真写了也还没写出去，断言照样绿（比假红更坏：它静默地不再有判别力）。
+
+    为什么 `pending_bytes == 0` 是正确答案：在途计数只在 `SessionRunner._release` 里扣减，
+    而 `_release` 是在 `host.write()` **返回之后**才被调用的（见 `_write_loop`）。于是：
+
+    - 还有字节没写出去 ⇒ 计数必然 > 0，栅栏不会被“提前满足”；
+    - 计数归零 ⇒ 此前入队的每一次写都真的落到宿主上了。
+
+    这条不变量由两处钉住：`test_hub.py::test_writes_drained_waits_for_a_gated_write`（写线程
+    卡在闸上时栅栏不得放行）与 `test_sync_discipline.py`（扫 AST 确认扣减在 `write()` 之后的
+    `finally` 里——它一旦被挪到写之前，上面这条推理就整个失效）。
+    """
+    runner = runner_of(hub, session_id)
+    await wait_for(lambda: runner.pending_bytes == 0, what="写线程排空输入队列")
+
+
 def make_endpoint(hub: Hub, client_id: str, *, baseline: int = 0) -> Endpoint:
     """构造接收侧记录器。
 
@@ -261,17 +386,19 @@ def make_endpoint(hub: Hub, client_id: str, *, baseline: int = 0) -> Endpoint:
 
 
 __all__ = [
-    "SETTLE",
     "BlockingCloseHost",
     "BlockingHost",
     "Endpoint",
     "client_of",
+    "feed",
     "host_of",
     "hub_context",
     "make_endpoint",
     "make_settings",
     "process_alive",
-    "settle",
+    "runner_of",
+    "turn",
     "wait_for",
     "wait_until",
+    "writes_drained",
 ]
