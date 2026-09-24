@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<!--
+  favicon 内联成 data URI：不发额外请求、不引外部资源（项目禁 CDN）。
+  不写它的话浏览器会自动去要 /favicon.ico，日志和控制台里各留一条 404。
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230a0d12'/%3E%3Cpath d='M8 11l5 5-5 5' fill='none' stroke='%233fb950' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M17 21h7' fill='none' stroke='%234c9aff' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+<title>网页终端</title>
+</head>
+<body>
+  <!--
+    结构由 main.ts 装配。这里只放骨架，不写业务标记：
+    DOM 一律用 createElement 生成，绝不用 innerHTML 拼终端数据（终端输出是不可信输入）。
+  -->
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

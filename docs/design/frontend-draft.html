@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>网页终端 · 前端设计稿 v1</title>
+<style>
+  :root{
+    --bg:#0b0e13; --panel:#12161d; --panel-2:#171c25; --line:#242b36;
+    --fg:#e3e8ef; --fg-dim:#8b97a8; --fg-faint:#5c6779;
+    --accent:#4c9aff; --ok:#3fb950; --warn:#d29922; --bad:#f85149;
+    --term-bg:#0a0d12; --term-fg:#ccd3dc;
+    --mono:"Cascadia Mono","Cascadia Code",Consolas,"Sarasa Mono SC","Noto Sans Mono CJK SC",
+           "Microsoft YaHei Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--fg)}
+  body{font:13px/1.6 system-ui,"Segoe UI","Microsoft YaHei",sans-serif;padding:28px 32px 80px}
+  h1{font-size:17px;margin:0 0 4px}
+  h2{font-size:13px;font-weight:600;color:var(--fg-dim);text-transform:none;
+     letter-spacing:.02em;margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  p{margin:8px 0;color:var(--fg-dim)}
+  code{font-family:var(--mono);background:#1b212b;padding:1px 5px;border-radius:3px;
+       font-size:12px;color:#c9d4e3}
+  .lead{color:var(--fg-dim);max-width:76ch}
+
+  /* ---------- 主界面 ---------- */
+  .app{
+    width:1180px;height:660px;background:var(--panel);border:1px solid var(--line);
+    border-radius:8px;overflow:hidden;display:grid;
+    grid-template-columns:228px 1fr;grid-template-rows:38px 1fr;
+  }
+  .sidebar{grid-row:1/3;background:var(--panel-2);border-right:1px solid var(--line);
+           display:flex;flex-direction:column;min-width:0}
+  .side-head{padding:12px 12px 10px;display:flex;align-items:center;gap:8px;
+             border-bottom:1px solid var(--line)}
+  .brand{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--fg)}
+  .brand span{color:var(--fg-faint);font-weight:400}
+  .btn-new{margin-left:auto;width:22px;height:22px;border-radius:5px;border:1px solid var(--line);
+           background:transparent;color:var(--fg-dim);cursor:default;font-size:14px;line-height:1}
+  .sess{padding:8px 12px;display:flex;gap:8px;align-items:flex-start;cursor:default;
+        border-left:2px solid transparent;min-width:0}
+  .sess + .sess{border-top:1px solid rgba(255,255,255,.03)}
+  .sess.on{background:#1d2632;border-left-color:var(--accent)}
+  .sess .dot{width:6px;height:6px;border-radius:50%;margin-top:6px;flex:0 0 auto;background:var(--ok)}
+  .sess.dead .dot{background:var(--fg-faint)}
+  .sess .body{min-width:0;flex:1}
+  .sess .nm{font-size:12.5px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sess .sub{font-size:11px;color:var(--fg-faint);white-space:nowrap;overflow:hidden;
+             text-overflow:ellipsis;font-family:var(--mono)}
+  .side-foot{margin-top:auto;padding:9px 12px;border-top:1px solid var(--line);
+             font-size:11px;color:var(--fg-faint);display:flex;justify-content:space-between}
+
+  .topbar{display:flex;align-items:center;gap:14px;padding:0 14px;
+          border-bottom:1px solid var(--line);background:var(--panel)}
+  .topbar .title{font-size:12.5px;color:var(--fg);white-space:nowrap;overflow:hidden;
+                 text-overflow:ellipsis}
+  .topbar .cwd{color:var(--fg-faint);font-family:var(--mono);font-size:11.5px;
+               white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
+  .chips{display:flex;gap:6px;align-items:center;flex:0 0 auto}
+  .chip{font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);
+        color:var(--fg-dim);display:flex;align-items:center;gap:5px;white-space:nowrap}
+  .chip i{width:5px;height:5px;border-radius:50%;background:currentColor;display:block}
+  .chip.ok{color:var(--ok);border-color:#1d3a24;background:#0f1d13}
+  .chip.warn{color:var(--warn);border-color:#3a2f14;background:#1d1809}
+  .chip.bad{color:var(--bad);border-color:#3d1f1e;background:#1e0f0f}
+  .chip.info{color:var(--accent);border-color:#1c3355;background:#0e1726}
+  .chip.font{font-family:var(--mono)}
+
+  .term{position:relative;background:var(--term-bg);overflow:hidden}
+  .grid{position:absolute;inset:0;padding:10px 12px;font-family:var(--mono);color:var(--term-fg);
+        white-space:pre;overflow:hidden}
+  .grid .r{height:19px;line-height:19px;display:block;white-space:pre}
+  .f1{color:#79c0ff}.f2{color:#7ee787}.f3{color:#ffa657}.f4{color:#d2a8ff}
+  .f5{color:#ff7b72}.dim{color:#6b7684}.cur{background:#3f4a5a;color:#fff}
+  .bar{display:inline-block;background:#1f6feb;color:#fff}
+
+  /* ---------- 状态卡 ---------- */
+  .states{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:12px}
+  .card h3{font-size:12px;margin:0 0 6px;font-weight:600}
+  .card .why{font-size:11.5px;color:var(--fg-dim);min-height:52px}
+  .card .demo{background:var(--term-bg);border-radius:5px;border:1px solid var(--line);
+              padding:7px 9px;margin:9px 0 0;font-family:var(--mono);font-size:11px;
+              color:var(--term-fg);white-space:pre-wrap;line-height:1.5}
+  .tag{display:inline-block;font-size:10.5px;padding:1px 6px;border-radius:3px;
+       border:1px solid var(--line);color:var(--fg-faint);margin-bottom:4px}
+
+  /* ---------- 交互 demo ---------- */
+  .lab{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+  .row{display:flex;gap:22px;flex-wrap:wrap;align-items:flex-start}
+  .ctl{min-width:250px}
+  .ctl label{display:block;font-size:11.5px;color:var(--fg-dim);margin:12px 0 3px}
+  .ctl input[type=range]{width:100%;accent-color:var(--accent)}
+  .stage{position:relative;border:1px solid var(--line);background:#0f1319;border-radius:6px;
+         overflow:hidden;flex:0 0 auto}
+  .stage .frame{position:absolute;border:1px dashed #2c3644}
+  .stage .cellgrid{position:absolute;font-family:var(--mono);white-space:pre;color:#8f9bab;
+                   font-weight:400}
+  .readout{font-family:var(--mono);font-size:11.5px;color:var(--fg-dim);margin-top:12px;
+           display:grid;grid-template-columns:auto 1fr;gap:2px 14px;max-width:420px}
+  .readout b{color:var(--fg);font-weight:500}
+  .seg{display:flex;gap:0;margin-top:10px;border:1px solid var(--line);border-radius:5px;
+       overflow:hidden;width:fit-content}
+  .seg button{background:transparent;border:0;color:var(--fg-dim);font:inherit;font-size:11.5px;
+              padding:4px 10px;cursor:pointer}
+  .seg button.on{background:#1d2632;color:var(--fg)}
+  .note{font-size:11.5px;color:var(--fg-faint);margin-top:10px;max-width:70ch}
+
+  /* ---------- 待定项 ---------- */
+  ol.forks{padding-left:0;list-style:none;counter-reset:f;max-width:88ch}
+  ol.forks li{counter-increment:f;position:relative;padding:11px 0 11px 34px;
+              border-bottom:1px solid var(--line)}
+  ol.forks li::before{content:"?" counter(f);position:absolute;left:0;top:11px;width:22px;
+      height:22px;border-radius:50%;background:#16202e;border:1px solid #24466e;color:#79b8ff;
+      font-size:11px;display:flex;align-items:center;justify-content:center;font-weight:600}
+  ol.forks .q{font-size:12.5px;color:var(--fg);margin-bottom:3px}
+  ol.forks .a{font-size:11.5px;color:var(--fg-dim)}
+  ol.forks .a em{color:#79b8ff;font-style:normal}
+  .marker{display:inline-flex;width:15px;height:15px;border-radius:50%;background:#16202e;
+          border:1px solid #24466e;color:#79b8ff;font-size:9.5px;font-weight:600;
+          align-items:center;justify-content:center;vertical-align:top;margin-left:3px}
+</style>
+</head>
+<body>
+
+<h1>网页终端 · 前端设计稿 <span style="color:var(--ok);font-weight:400;font-size:13px">v1 / 已确认并实现</span></h1>
+<p class="lead" style="color:var(--fg)">四项分叉已定（2026-09-21）：<b>①侧栏 + 顶栏状态条　②字号 0.5px 吸附　③先只做单会话切换　④仅深色</b>。实现见 <code>frontend/</code>；本页保留为设计依据，实际落地效果用 <code>npm run probe</code> 的截图核对。</p>
+<p class="lead">深色单主题。左栏会话列表、顶栏会话状态、终端占满其余区域。终端网格尺寸由后端定死
+（默认 120×30），前端只负责把它<b>铺满</b>可用区域 —— 字号是因变量。带 <span class="marker">?</span>
+的地方是待你拍板的分叉点，最后有汇总。</p>
+
+<h2>一、主界面</h2>
+<div class="app">
+  <div class="sidebar">
+    <div class="side-head">
+      <div class="brand">terminald<span> · 本机</span></div>
+      <button class="btn-new">+</button>
+    </div>
+
+    <div class="sess on">
+      <span class="dot"></span>
+      <div class="body">
+        <div class="nm">build · 前端打包</div>
+        <div class="sub">~/projects/term/frontend</div>
+      </div>
+    </div>
+    <div class="sess">
+      <span class="dot"></span>
+      <div class="body">
+        <div class="nm">api-server</div>
+        <div class="sub">python -m terminald --port 8765</div>
+      </div>
+    </div>
+    <div class="sess">
+      <span class="dot" style="background:var(--warn)"></span>
+      <div class="body">
+        <div class="nm">logs · tail</div>
+        <div class="sub">C:\Users\me\AppData\Local\Temp</div>
+      </div>
+    </div>
+    <div class="sess dead">
+      <span class="dot"></span>
+      <div class="body">
+        <div class="nm">migrate</div>
+        <div class="sub">已退出 · code 0</div>
+      </div>
+    </div>
+
+    <div class="side-foot"><span>4 个会话</span><span>2 个客户端</span></div>
+  </div>
+
+  <div class="topbar">
+    <div class="title">build · 前端打包</div>
+    <div class="cwd">~/projects/term/frontend</div>
+    <div class="chips">
+      <span class="chip info font">120×30</span>
+      <span class="chip font">9.0px</span>
+      <span class="chip ok"><i></i>已连接</span>
+      <span class="chip"><i style="background:#d2a8ff"></i>2 客户端</span>
+    </div>
+  </div>
+
+  <div class="term">
+    <div class="grid">
+      <span class="r"><span class="f2">me@host</span> <span class="f1">~/projects/term/frontend</span> <span class="dim">(main)</span></span>
+      <span class="r">$ <span class="cur">n</span>pm run build</span>
+      <span class="r"></span>
+      <span class="r">  <span class="dim">vite v6.0.0</span>  building for production...</span>
+      <span class="r">  <span class="f2">✓</span> 42 modules transformed.</span>
+      <span class="r">  <span class="dim">dist/index.html</span>                   <span class="dim">0.46 kB</span> <span class="f2">│ gzip:  0.30 kB</span></span>
+      <span class="r">  <span class="dim">dist/assets/index-Ck3f.js</span>        <span class="dim">182.14 kB</span> <span class="f2">│ gzip: 57.90 kB</span></span>
+      <span class="r">  <span class="f2">✓</span> built in <span class="f3">1.42s</span></span>
+      <span class="r"></span>
+      <span class="r">$ <span class="cur"> </span></span>
+      <span class="r"></span>
+      <span class="r"><span class="dim">┌────────────────────────────────────────────────────────────────┐</span></span>
+      <span class="r"><span class="dim">│</span> 会话是服务端一等对象，刷新 / 切换标签都不影响里面跑的程序。   <span class="dim">│</span></span>
+      <span class="r"><span class="dim">│</span> CJK 宽度、256 色、truecolor、制表符 ── ┌─┬─┐ └─┴─┘ ▁▂▃▅▇ 均需正确。<span class="dim">│</span></span>
+      <span class="r"><span class="dim">└────────────────────────────────────────────────────────────────┘</span></span>
+      <span class="r"></span>
+      <span class="r">  <span class="bar"> 危险 </span> <span class="f5">危险</span> <span class="f3">警告</span> <span class="f2">通过</span> <span class="f1">信息</span> <span class="f4">魔法紫</span> <span class="dim">次要说明文字</span></span>
+      <span class="r"></span>
+      <span class="r">$ <span class="cur"> </span></span>
+    </div>
+  </div>
+</div>
+<p class="note">终端区可滚动（xterm.js 自带缓冲滚动条）。鼠标滚轮上滚即进入历史；滚到底则跟随输出。
+选中即复制不需要按钮；粘贴走浏览器 paste 事件，bracketed paste 由 xterm.js 自动包裹。</p>
+
+<h2>二、连接与同步状态（四种，都会被真实触发）</h2>
+<div class="states">
+  <div class="card">
+    <span class="tag">正常</span>
+    <h3 style="color:var(--ok)">已连接 · 无损续传</h3>
+    <div class="why">首帧带本地偏移，后端只补断档。刷新页面走的就是这条路 —— <b>scrollback 一起回来</b>，因为重放的是原始字节。</div>
+    <div class="demo"><span style="color:#7ee787">●</span> 已连接　<span style="color:#8b97a8">resumed=true</span>
+offset 8192 · 补了 1204 B</div>
+  </div>
+  <div class="card">
+    <span class="tag">短暂</span>
+    <h3 style="color:var(--warn)">重连中</h3>
+    <div class="why">socket 断开后自动退避重连。期间终端内容<b>照常保留在页面上</b>，不清屏、不显示骨架——后端会话没受任何影响。</div>
+    <div class="demo"><span style="color:#d29922">○</span> 重连中… <span style="color:#8b97a8">第 2 次 · 0.8s</span>
+<span style="color:#5c6779">屏幕内容保留，等待续传</span></div>
+  </div>
+  <div class="card">
+    <span class="tag">需要动作</span>
+    <h3 style="color:var(--warn)">落后 · 待重同步</h3>
+    <div class="why">本地游标落后到日志已裁剪的区间。后端发 <code>behind</code> 后<b>停止推送</b>；前端自动发 <code>resync</code> 整段重建。</div>
+    <div class="demo"><span style="color:#d29922">▲</span> 内容已过期，正在重建…
+<span style="color:#5c6779">reason=trimmed · offset=12288</span></div>
+  </div>
+  <div class="card">
+    <span class="tag">有损</span>
+    <h3 style="color:#d2a8ff">已重建（保真度警告）</h3>
+    <div class="why">重建靠终端模型快照，是整套机制里<b>唯一有损</b>的路径：断点之前的内容丢了（等同原生 scrollback 写满）。与无损对齐分开计数、分开提示。</div>
+    <div class="demo"><span style="color:#d2a8ff">◐</span> 已重建 · 断点前内容不可恢复
+<span style="color:#5c6779">resumed=false</span></div>
+  </div>
+</div>
+<p class="note">第三、四张卡是同一件事的两个层次：<code>behind</code> 只是「你落后了」，重建之后才算「有损」。
+分开显示是为了让「刷新丢了一截」这种状况可被解释，而不是变成用户眼里的随机丢失。</p>
+
+<h2>三、字号求解（可拖动）</h2>
+<div class="lab">
+  <p style="margin-top:0">网格 <b>120 列 × 30 行</b> 固定不变，容器尺寸可变。求一个字号 + 行高 + 字距，
+     让内容<b>正好铺满</b>可用区域。</p>
+  <div class="row">
+    <div class="ctl">
+      <label>容器宽 <b id="wv">1120</b> px</label>
+      <input id="w" type="range" min="700" max="1600" value="1120">
+      <label>容器高 <b id="hv">560</b> px</label>
+      <input id="h" type="range" min="300" max="900" value="560">
+      <label>求解策略</label>
+      <div class="seg">
+        <button id="m-cont" class="on">连续自适应</button>
+        <button id="m-snap">0.5px 吸附</button>
+      </div>
+      <div class="readout">
+        <span>字号</span><b id="o-fs">—</b>
+        <span>行高倍数</span><b id="o-lh">—</b>
+        <span>字距</span><b id="o-ls">—</b>
+        <span>单格</span><b id="o-cell">—</b>
+        <span>网格占用</span><b id="o-grid">—</b>
+        <span>受限轴</span><b id="o-bind">—</b>
+        <span>剩余</span><b id="o-left">—</b>
+      </div>
+    </div>
+    <div class="stage" id="stage" style="width:1120px;height:560px">
+      <div class="cellgrid" id="cells"></div>
+      <div class="frame" id="frame"></div>
+    </div>
+  </div>
+  <p class="note">竖直方向可以精确铺满：xterm 的 <code>lineHeight</code> 是倍数，直接解出
+     <code>H / (rows × fs)</code> 即可，但会钳在 [1.05, 1.60] —— 无限拉大行高只会让字距看起来断掉。
+    水平方向 <code>letterSpacing</code> <b>只吃整数像素</b>，所以宽度会留下 &lt;1 格像素的余量；
+     这点余量居中留白，不拉伸字形。字体只用系统栈（项目禁 CDN），所以 CJK 宽度的正确性取决于本机
+     装没装等宽 CJK 字体 —— 第一版会在启动时把实测到的单格宽高与理论值比对一次，不一致就提示。</p>
+  <p class="note"><b>把宽度拉大、高度压扁试试</b>：因为网格被钉死在 120×30，短而宽的窗口会有大量横向
+     空间用不上（字号被高度卡住）。这不是算法缺陷，而是「尺寸由终端侧决定」的必然结果 ——
+     要改只能改服务端的 <code>--cols/--rows</code>，不能在浏览器里自适应。</p>
+</div>
+
+<h2>四、四个分叉（已拍板）</h2>
+<ol class="forks">
+  <li>
+    <div class="q">布局：侧栏 + 顶栏状态条（本稿）</div>
+    <div class="a">备选：<em>顶部标签页</em>（更省空间，但每个会话的状态信息只能挤成一个点）；
+      <em>侧栏 + 标签页都做</em>（信息重复）。本稿选侧栏，因为会话名、cwd、退出码这些都有用。</div>
+  </li>
+  <li>
+    <div class="q">字号求解：连续自适应（本稿默认）还是 0.5px 吸附？</div>
+    <div class="a">连续自适应能精确铺满，但改窗口大小时字号连续跳动；
+      <em>吸附</em>让字号稳定、字形更锐利，代价是边缘留几个像素。
+      上面第二个按钮就是吸附的实感，请拖一下再定。</div>
+  </li>
+  <li>
+    <div class="q">一次只看一个会话（本稿），还是支持分屏同看多个？</div>
+    <div class="a">协议上一条 WebSocket = 一个客户端 = 最多订阅一个会话。分屏要同时开 N 条连接
+      （技术上没问题，后端已支持多客户端）。这会明显影响布局复杂度与资源占用，需要你定。</div>
+  </li>
+  <li>
+    <div class="q">只管深色（本稿），还是深/浅可切？</div>
+    <div class="a">浅色不是「换个变量」那么简单：终端调色板、ANSI 16 色、光标、选区、滚动条、
+      xterm 的 <code>minimumContrastRatio</code> 都要各配一套并逐项验证对比度。</div>
+  </li>
+</ol>
+
+<script>
+(function(){
+  const COLS = 120, ROWS = 30;
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font-family:var(--mono)';
+  document.body.appendChild(probe);
+
+  // 实测「1px 字号对应多少像素格宽」——不同机器字体不同，必须量不能猜
+  function cellRatio(){
+    probe.style.fontSize = '100px';
+    probe.style.lineHeight = '1';
+    probe.textContent = 'M'.repeat(20);
+    return probe.getBoundingClientRect().width / 20 / 100;
+  }
+  const KX = cellRatio();
+
+  let mode = 'cont';
+  const $ = id => document.getElementById(id);
+
+  // 行高倍数的钳位区间：拉太大字看起来是断开的
+  const LH_MIN = 1.05, LH_MAX = 1.60, LS_MAX = 4;
+
+  function solve(W,H){
+    const fsW = W/(COLS*KX);          // 宽度允许的最大字号
+    const fsH = H/(ROWS*1.30);        // 高度允许的最大字号（按名义行高估）
+    let fs = Math.min(fsW, fsH);
+    const snapped = (mode === 'snap');
+    if(snapped){ fs = Math.floor(fs*2)/2; }   // 只向下吸附，绝不越界
+    if(fs < 4){ fs = 4; }
+
+    const binding = fsW < fsH ? '宽度' : '高度';
+    // 受限轴的余量精确解进行高；另一轴若还有余量则放进整数像素的字距
+    let lineHeight = Math.min(Math.max((H/ROWS)/fs, LH_MIN), LH_MAX);
+    let ls = Math.floor((W/COLS) - fs*KX);
+    if(ls < 0){ ls = 0; }
+    if(ls > LS_MAX){ ls = LS_MAX; }
+
+    const cellW = fs*KX + ls, cellH = fs*lineHeight;
+    const usedW = cellW*COLS, usedH = cellH*ROWS;
+    return {fs, lineHeight, ls, cellW, cellH, usedW, usedH,
+            leftW: W-usedW, leftH: H-usedH, binding, snapped};
+  }
+
+  function render(){
+    const W = +$('w').value, H = +$('h').value;
+    $('wv').textContent = W; $('hv').textContent = H;
+    $('stage').style.width = W+'px'; $('stage').style.height = H+'px';
+
+    const r = solve(W,H);
+    const padX = Math.max(0, r.leftW)/2;
+    const padY = Math.max(0, r.leftH)/2;
+
+    $('frame').style.cssText =
+      `position:absolute;left:${padX}px;top:${padY}px;border:1px dashed #2c3644;`+
+      `width:${r.usedW}px;height:${r.usedH}px`;
+
+    // 用背景网格示意单元格密度（真实渲染由 xterm.js 负责，这里只表示格子大小）
+    const cg = $('cells');
+    cg.textContent = '';
+    cg.style.cssText =
+      `position:absolute;left:${padX}px;top:${padY}px;`+
+      `width:${r.usedW}px;height:${r.usedH}px;`+
+      `background-image:`+
+      `repeating-linear-gradient(to right,#1c2431 0 1px,transparent 1px ${r.cellW}px),`+
+      `repeating-linear-gradient(to bottom,#1c2431 0 1px,transparent 1px ${r.cellH}px);`;
+
+    $('o-fs').textContent   = r.fs.toFixed(2)+' px'+(r.snapped?'（已吸附）':'');
+    $('o-lh').textContent   = r.lineHeight.toFixed(4);
+    $('o-ls').textContent   = r.ls+' px';
+    $('o-cell').textContent = r.cellW.toFixed(2)+' × '+r.cellH.toFixed(2);
+    $('o-grid').textContent = r.usedW.toFixed(1)+' × '+r.usedH.toFixed(1)+' px';
+    $('o-bind').textContent = r.binding+'（'+(r.binding==='高度'?'横向留白':'行高被钳位')+'）';
+    $('o-left').textContent = '水平 '+r.leftW.toFixed(1)+' px，垂直 '+r.leftH.toFixed(1)+' px';
+  }
+
+  ['w','h'].forEach(id => $(id).addEventListener('input', render));
+  $('m-cont').addEventListener('click', () => {
+    mode='cont'; $('m-cont').classList.add('on'); $('m-snap').classList.remove('on'); render(); });
+  $('m-snap').addEventListener('click', () => {
+    mode='snap'; $('m-snap').classList.add('on'); $('m-cont').classList.remove('on'); render(); });
+  render();
+})();
+</script>
+</body>
+</html>
