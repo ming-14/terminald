@@ -1,0 +1,87 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "terminald"
+version = "0.1.0"
+description = "Web terminal daemon — pywezterm-backed persistent sessions over WebSocket"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# 注意：pywezterm 不在 PyPI 上，它是本仓库 vendor/wheels/ 里的本地 wheel，
+# 因此**不能**写进 dependencies（否则 pip install -e . 必然失败）。
+# 正确顺序见 backend/README.md：先装 vendor wheel，再装本项目。
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.30,<1",
+  "pydantic>=2.9,<3",
+  "pydantic-settings>=2.5,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.24",
+  # 没有它，任何一个「等消息但消息不来」的用例都会把 CI 变成永久挂住
+  "pytest-timeout>=2.3",
+  # starlette 的 TestClient 需要 HTTP 客户端；starlette>=1 优先用 httpx2（httpx 已弃用）
+  "httpx2>=2",
+  "mypy>=1.11",
+  "ruff>=0.6",
+]
+
+[project.scripts]
+terminald = "terminald.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/terminald"]
+
+# ---------------------------------------------------------------- pytest
+# pythonpath 让 tests/ 无需 pip install -e 即可导入 src/terminald
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# 用例里大量依赖「等某个条件成立」，一旦条件永不成立就会永久阻塞而不是失败。
+# 全局超时把这种挂起变成一次明确的失败。
+timeout = 60
+addopts = "-ra --strict-markers"
+markers = [
+  "contract: 需要真实 pywezterm 的环境契约测试",
+]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "ASYNC", "S", "T20",
+]
+ignore = [
+  "S101",   # 测试里用 assert
+  "A003",   # 与内建同名的类属性（如 Client.id）在领域模型里可接受
+  # 全角标点：本项目注释/文档字符串一律中文，RUF001-003 的同形字检查在这里只产生噪声。
+  # 它防的是「代码里混入同形字符」这种隐蔽攻击，而我们的标点全在自然语言文本里。
+  "RUF001",
+  "RUF002",
+  "RUF003",
+  # 领域错误按**状态**命名（SessionNotFound / OffsetAhead ...），不是「某类异常」，
+  # 加 Error 后缀反而会丢掉信息量（见 core/errors.py 的说明）。
+  "N818",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试里不查安全规则（S）与 print（T20）；ASYNC109 是给生产代码的提示
+# （要求用 asyncio.timeout 而不是传 timeout 参数），测试脚手架里的轮询等待不适用。
+"tests/**" = ["S", "T20", "ASYNC109"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+warn_unreachable = true

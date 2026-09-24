@@ -1,0 +1,53 @@
+{
+  "$comment": "控制消息的字段形状契约 —— 由 backend 的 pydantic 模型生成，前端逐字比对。它是**单一事实**：前端 src/protocol/messages.ts 里那套校验器（SHAPES / SESSION_INFO_SHAPE）允许手写，但必须与这份文件完全一致。任何一侧改了字段或形状，两侧的测试都会红。重新生成：cd backend && PYTHONPATH=src ./.venv/Scripts/python.exe -c \"import json;from terminald.protocol.messages import server_message_shapes;print(json.dumps(server_message_shapes(), ensure_ascii=False, indent=2, sort_keys=True))\" > src/terminald/protocol/vectors/shapes.json",
+  "attached": {
+    "cols": "int",
+    "offset": "int",
+    "resumed": "bool",
+    "rows": "int",
+    "scrollback": "int",
+    "session": "str"
+  },
+  "behind": {
+    "offset": "int",
+    "reason": "str",
+    "session": "str"
+  },
+  "error": {
+    "code": "str",
+    "message": "str"
+  },
+  "exited": {
+    "code": "int",
+    "session": "str"
+  },
+  "hello_ok": {
+    "protocol": "int",
+    "server": "str"
+  },
+  "input_hold": {
+    "paused": "bool",
+    "session": "str"
+  },
+  "meta": {
+    "cwd": "str|null",
+    "progress_label": "str",
+    "progress_value": "int|null",
+    "session": "str",
+    "title": "str|null"
+  },
+  "session_info": {
+    "cols": "int",
+    "created_at": "str",
+    "cwd": "str|null",
+    "id": "str",
+    "name": "str",
+    "pid": "int|null",
+    "rows": "int",
+    "status": "str",
+    "title": "str|null"
+  },
+  "sessions": {
+    "items": "sessionInfo[]"
+  }
+}

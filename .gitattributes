@@ -1,0 +1,7 @@
+# 声明这几类是二进制：它们本来就该逐字节原样保存（Windows 上行尾转换会把它们弄坏）。
+# 其余文件交给 git 自己判断，不做全局行尾规约——那是一个项目级决定，不该由 .gitattributes 顺手做掉。
+*.whl  binary
+*.pyd  binary
+*.dll  binary
+*.exe  binary
+*.png  binary

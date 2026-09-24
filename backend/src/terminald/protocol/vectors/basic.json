@@ -1,0 +1,70 @@
+{
+  "$comment": "协议共享测试向量 —— 前后端各跑一遍，任何一侧漂移都会红。hex 小写无空格。",
+  "version": 1,
+  "$format": "FRAME = 长度(u32 BE) | tag(u8) | [offset(u64 BE)] | payload；长度覆盖 tag+offset+payload",
+  "$offsets": "帧里的 offset 是 u64，用**十进制字符串**表示：JSON 的 number 是双精度，超过 2^53 就不精确，下面那条 8 字节 offset 的用例正是要覆盖这一点。控制消息里的 offset 走 JSON number（那是它在线上的真实形态），所以保持数字。",
+  "output_frames": [
+    {
+      "why": "offset=0 纯文本 hello：长度 = 1+8+5 = 14",
+      "offset": "0",
+      "payload_utf8": "hello",
+      "hex": "0000000e01000000000000000068656c6c6f"
+    },
+    {
+      "why": "8 字节大端 offset、空负载（该值 > 2^53，只能用字符串表达）：长度 = 1+8 = 9",
+      "offset": "72623859790382856",
+      "payload_utf8": "",
+      "hex": "00000009010102030405060708"
+    },
+    {
+      "why": "含转义序列的负载按字节原样透传：长度 = 1+8+12 = 21",
+      "offset": "42",
+      "payload_utf8": "\u001b[31mred\u001b[0m",
+      "hex": "0000001501000000000000002a1b5b33316d7265641b5b306d"
+    }
+  ],
+  "snapshot_frames": [
+    {
+      "why": "SNAPSHOT 与 OUTPUT 同布局、不同 tag：应用后对齐到 offset=100",
+      "offset": "100",
+      "payload_utf8": "AB",
+      "hex": "0000000b0300000000000000644142"
+    }
+  ],
+  "input_frames": [
+    { "why": "单字节按键：长度 = 1+1 = 2", "payload_utf8": "a", "hex": "000000020261" },
+    { "why": "方向键：长度 = 1+3 = 4", "payload_utf8": "\u001b[A", "hex": "00000004021b5b41" },
+    { "why": "UTF-8 中文 你好：长度 = 1+6 = 7", "payload_utf8": "\u4f60\u597d", "hex": "0000000702e4bda0e5a5bd" }
+  ],
+  "batched": [
+    {
+      "why": "一条消息串接两个帧：OUTPUT(0,\"hi\") + INPUT(\"x\")",
+      "hex": "0000000b0100000000000000006869000000020278"
+    }
+  ],
+  "control_messages": [
+    { "why": "握手", "json": { "t": "hello", "protocol": 1, "client": "web" } },
+    { "why": "全新订阅（无断点续传）", "json": { "t": "attach", "session": "s1", "resume": null } },
+    { "why": "带断点续传", "json": { "t": "attach", "session": "s1", "resume": 4096 } },
+    {
+      "why": "订阅成功",
+      "json": {
+        "t": "attached",
+        "session": "s1",
+        "cols": 120,
+        "rows": 30,
+        "scrollback": 10000,
+        "offset": 8192,
+        "resumed": true
+      }
+    },
+    {
+      "why": "落后通知（必须显式，不得静默丢字节）",
+      "json": { "t": "behind", "session": "s1", "offset": 12288, "reason": "trimmed" }
+    },
+    {
+      "why": "输入暂缓（输入方向流控；客户端须按 session 过滤，切换会话后不得沿用）",
+      "json": { "t": "input_hold", "session": "s1", "paused": true }
+    }
+  ]
+}
