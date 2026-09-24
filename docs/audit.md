@@ -1,6 +1,6 @@
 # 审计报告
 
-审计日期：2026-09-22（首轮缺陷）、2026-09-24（第二轮：清理与验证层）、2026-09-25（第三轮：交付前清理）｜ 范围：`backend/`、`frontend/`、`docs/`、`vendor/` ｜ 方式：读代码 + 跑测试 + 真实 PTY/真实浏览器探针
+审计日期：2026-09-22（首轮缺陷）、2026-09-24（第二轮：清理与验证层）、2026-09-25（第三轮：交付前清理）、2026-09-25（第四轮：测试同步纪律）｜ 范围：`backend/`、`frontend/`、`docs/`、`vendor/` ｜ 方式：读代码 + 跑测试 + 真实 PTY/真实浏览器探针
 
 三层验证都做了，结论如下。全部缺陷（A1–A13）已修复并**各自留下一条能在 CI 里跑的回归**，对照表见文末
 §3；当时用的一次性取证脚本（`backend/.audit/*.py`）已完成使命、**已删除**，文中的实测数字是它们留下的结论。
@@ -14,15 +14,19 @@
 第三轮（2026-09-25）是交付前的清理：死代码与陈旧引用、两个入口不一致的校验、
 源文件里被嵌入的不可见控制字节，以及一条**偶发假红**的探针。发现与处置记在 §2.8。
 
+第四轮（2026-09-25）审的是**测试怎么等**：默认套件里用固定睡眠当同步手段的地方全部换成
+具名栅栏，并把这条纪律做成会红的测试。发现与处置记在 §2.9——§2.7.1 那条未能归因的偶发红，
+其机制类别（“等到的不是事件，而是时间”）也随之从套件里消失。
+
 ---
 
 ## 0. 先说通过的部分
 
 | 项 | 结果 |
 |---|---|
-| 后端测试（默认） | `240 passed, 32 skipped` |
+| 后端测试（默认） | `261 passed, 32 skipped`（10 秒内跑完；零固定睡眠，见 §2.9） |
 | 后端契约测试（真实 pywezterm + ConPTY） | `TERMINALD_CONTRACT=1 pytest -m contract` → **32 passed**（含 A13 拆除路径与输入字节保真两条回归） |
-| `ruff check .` / `ruff format --check .` | 通过（无告警、48 文件已格式化） |
+| `ruff check .` / `ruff format --check .` | 通过（无告警、49 文件已格式化） |
 | `mypy src` | 通过（31 个源文件） |
 | `tsc --noEmit` | 通过 |
 | `vitest run` | 115 passed（6 个测试文件，含前后端字段形状契约） |
@@ -702,6 +706,18 @@ A10 的第一版（服务端双水位 + 硬上限 + “客户端在本端排队�
 但那条命令兑现了它的价值，只是兑现在了探针层：同一轮里 `probe/input-hold.mjs` 出现了
 **同类的偶发红**（5 次里红 1 次），而且这次拿到了名字与现场，机制已查清并修好，见 §2.8。
 
+**第四轮的处置（2026-09-25，§2.9）**：既然“等到的不是事件而是时间”是这一类失败的共同机制，
+第四轮把默认套件里的固定睡眠整个移除了——`settle()` 及其 46 处调用点已不存在，
+套件里“150ms 够不够”不再是任何一条用例的前提。
+
+同轮还抓到了**同类但不同因**的一条：`test_input_backpressure.py` 把“字节写完了”当成放行的栅栏，
+而放行要经 `call_soon_threadsafe` 再转一圈（§2.9 D5）。它在同一负载下 **10 轮红 2**，修后 20 轮全绿。
+本条（§2.7.1）那条丢名字的红**仍然无法证明**是不是它——这条用例从来没有用过 `settle`，
+所以在当时也以完全相同的方式暴露着，只能说它是**真实存在且已捕获的候选**。
+
+教训也补上一句：这一轮我又把一次失败输出截成了 `tail -1`（名字再次丢掉），导致找它多花了十几轮实验。
+**跑套件时不要截尾部**，这条已经从“建议”变成“吃过一次亏”。
+
 ---
 
 ## 2.8 第三轮（2026-09-25）：交付前清理
@@ -738,6 +754,98 @@ C1 这条也把 §2.7.1 的结论补完整了：**未复现的那条 pytest 红�
 
 ---
 
+## 2.9 第四轮（2026-09-25）：测试同步纪律
+
+这一轮只做一件事：把默认套件里「靠时间猜」的等待全部换成「等真实条件」，并让这条纪律可执行。
+起因是 §2.7.1——那条未能归因的红，其机制候选里有一样比“某条用例超时”更根本的东西：
+`tests/support.py` 的 `settle()`（固定 `asyncio.sleep(0.15)`）被当成同步原语，用在 **46 处**。
+
+| 编号 | 一句话 | 为何危险 | 处置 |
+|---|---|---|---|
+| D1 | 相当一部分 `settle()` 压在**否定断言**前面（“应用不该收到焦点序列”“解除订阅后不该再收到内容”） | 写线程是异步的：不等待时“真的写了”也还没写出去，断言照样绿。**假绿比假红更坏**——它安静地失去判别力 | ✅ 新增 `writes_drained()` 写栅栏：`pending_bytes` 只在 `host.write()` **返回之后**才扣减，因此归零就等于“此前入队的每一次写都已落到宿主” |
+| D2 | 其余的是纯浪费：每轮白等约 6.6s，而真正在等流水线的只有 2 处（推送窗口那两条） | 用固定时长表达“等它做完”，机器的快慢就直接改写结论 | ✅ 换成 `feed()` 输出栅栏：`_ingest_output` 是**一段没有 await 的原子步**（喂模型 → 追加日志 → 裁剪 → 推给每个订阅者），所以“日志偏移已推进”一旦可观察，推送就已发生 |
+| D3 | 失败信息为零：`wait_for` 超时只抛“等待条件超时” | 分不清“没发生”和“还没发生”——与 §2.7.1 丢掉用例名是同一个教训 | ✅ 超时报出**判定点的源码位置**与已等待时长；栅栏还带上目标值（如“输出并入日志（目标 offset=1234）”） |
+| D4 | 这条纪律只写在注释里 | 下一轮又会有人写 `sleep(0.1)`，因为它“看起来更稳” | ✅ `tests/test_sync_discipline.py`：固定睡眠（`sleep(0)` 除外）会红；栅栏所依赖的原子性不变量也会红（15 个控制面函数不是协程且无 await、`EXITED` 分支无 await、`_release()` 在 `host.write()` 返回之后） |
+| D5 | `test_input_backpressure.py` 等的是**错的东西**：“字节写完了”不等于“客户端被放行了”——放行经 `call_soon_threadsafe` 回到事件循环，而 `drain_until_quiet()` 是同步的、给不出那一圈 | 机器忙时断言看到 0 条放行（而不是 1 条）——以“什么都没收到”的形式失败 | ✅ 栅栏改成“该客户端已被放行”（`input_held is False`；`_release_input` 先清标志再 `_send`，中间无 await）；同一负载下 **20 轮 0 红（修前 10 轮红 2）** |
+
+D5 是在 §2.9 的验证阶段**抓出来的**，不是读代码看出来的：把默认套件按文件拆开、每个文件在同一负载下连跑 10 轮，
+只有 `test_input_backpressure.py` 红了（2/10）：`test_input_hold_pauses_sender_without_dropping_bytes`。
+它与我本轮的改动无关（这个文件从未用过 `settle`），是一条**本来就存在**的、与 §2.7.1 同类的偶发红。
+两条都指向同一个教训：**不要把“A 做完了”当成“B 也做完了”的栅栏**（B 的完成需要事件循环再转一圈）。
+
+遗留的重复脚手架一并收掉：`test_api.py` 自己抄了一份 `wait_until`（行为与 `support.py` 的那份不同——连失败信息都没有，现已统一），并在一条日志偏移栅栏之后又 `time.sleep(0.1)`。
+
+### 怎么证明它真的有效（而不是“看着更整齐”）
+
+用 `git worktree` 把**旧提交**（含 46 处 `settle()`）取到 `/tmp`，与当前工作树在**同样条件**下跑同一套用例：
+
+| 人为制造的条件 | 旧套件（46 处固定睡眠） | 新套件（零固定睡眠） |
+|---|---|---|
+| 无（基线） | 240 passed / 17.1s | **259 passed / 10.5s** |
+| 把等待降为 0（= 机器在每次等待里都被抢占） | **2 failed** | 没有这个旋钮可拧 |
+| 每次 `read()` +60ms | 240 passed / 23.1s | 259 passed / 41.4s |
+| 每次 `read()` +120ms（≈ 旧上界 150ms 的 8 倍） | **1 failed**（`test_live_push_stops_at_the_window_and_resumes_on_ack`） | **259 passed** |
+
+后两行就是问题的定义：旧套件的余量是一个**常数**（150/200ms），顶穿它就红；新套件等的是条件，
+默认上界 3s（`wait_for` 的 timeout，个别用例按需放宽到 10s），而且失败时会说出**是哪个条件、在哪一行**。
+
+**为什么“每次读取慢 60ms”没让旧套件红**：旧用例量的是“游标 vs 当前日志末尾”，而日志末尾一直在长，
+慢一点反而更容易满足 `cursor < end` 这类断言——换句话说，它在慢这一侧靠的是运气，而不是靠等待。
+这也解释了为什么那条未归因的红只在**快**的方向（`settle` 被抢占到没等到）出现。
+
+**一个诚实的代价**：被人为拖慢时，新套件反而更慢（41s vs 23s），因为它真的在等每一段输出做完，
+而不是睡完就走。这与产品里的取舍同源：**宁可多等，也不要一个不知道自己测了什么的结果。**
+
+### 新纪律的判别力（逐条试过）
+
+| 人为制造的违反 | 预期 | 实测 |
+|---|---|---|
+| 往 `tests/` 放一个 `await asyncio.sleep(0.05)` | 红 | ✅ `test_no_fixed_sleeps_outside_polling_helpers` FAILED（指出文件:行） |
+| 把 `Hub._ingest_output` 改成协程 | 红 | ✅ `test_control_plane_effects_are_complete_on_return[_ingest_output]` FAILED |
+| 写线程卡在闸上时，写栅栏会不会提前放行 | 必须仍在等 | ✅ `test_writes_drained_waits_for_a_gated_write`（先 `turn()` 证明栅栏确实跑过一步，再断言未放行） |
+| 把 `_release()` 挪到 `host.write()` 之前、`finally` 留空 | 红 | ✅ `test_write_fence_counts_a_write_only_after_it_landed` FAILED |
+| 让 `_release()` 先通知（`_on_drained`）再扣减计数 | 红 | ✅ `test_write_fence_alone_does_not_prove_the_client_was_released` FAILED（报“等待写线程排空输入队列超时”——写栅栏不再独立于放行通知） |
+
+### 复核补充（2026-09-25，第四轮交付前）
+
+复核第四轮自己的产出时抓到两条**记录与代码不一致**，都在 D5 那次修改的旁边：
+
+| 编号 | 一句话 | 处置 |
+|---|---|---|
+| D6 | `writes_drained()` 的 docstring 说这条不变量由“`test_hub.py::test_writes_drained_waits_for_a_gated_write` **与** `test_sync_discipline.py`（调用顺序）”钉住，但纪律测试当时**完全没有看** `runner.py`——那条“写栅栏的依据”只在代码里，没有被机器盯住 | ✅ 补 `test_write_fence_counts_a_write_only_after_it_landed`（扫 AST：`host.write()` 的 `try` 必须有非空 `finally` 调用 `_release()`）。违反注入见上表 |
+| D7 | D5 的修复方向是对的，但**没有留下判别力**：把 D5 的 `wait_for(input_held is False)` 删掉，原来的断言（“按写栅栏去判断放行”）在任何负载下都只会**继续绿**——修复本身不可回归 | ✅ 补 `test_write_fence_alone_does_not_prove_the_client_was_released`：用一道闸把放行通知压后（与 `BlockingHost.write_gate` 同一手法），确定性地展示“写栅栏已满足而客户端仍被暂缓”，把 D5 的教训变成能红的用例 |
+
+同轮清理：`tests/support.py` 的模块 docstring 把四个栅栏写成了“三个”；`docs/audit.md` 本节的
+“上界 3s”未说明那是**默认值**（推送窗口两条按需放宽到 10s）；`frontend/probe/README.md` 的探针表
+被一段说明文字劈成两半（`shortcuts.mjs` / `conpty-alt-screen.mjs` 两行会渲染成字面文本）
+——三处均已改正。`test_input_backpressure.py` 里判断“有没有放行”的列表推导抄了两份，
+收成一个 `release_notices()`；“把队列压到高水位”的 4 行前置步骤也收成 `fill_to_high_water()`。
+
+这两条的性质与 D1–D5 不同：它们不是产品缺陷，是**审计记录比代码更乐观**——docstring 声称某处
+被机器盯住，实际没有。所以处置也只有一个方向：让那句话变成真的，或者把它删掉。
+
+### 为什么这几条栅栏是成立的
+
+每一条都对应管道上一个真实存在的观察点，而不是“估计够久了”：
+
+- **输出**：`_ingest_output` 无 await ⇒ 日志偏移可观察时，推送已发生（含裁剪与水位判定）；
+- **写入**：`_release()` 在 `host.write()` 返回之后才扣减在途计数 ⇒ 计数归零即写入已完成；
+- **控制面**：`handle_message` 的分发是同步调用 ⇒ `await` 返回时副作用已完成。
+
+三条都是**代码结构**上的性质，所以由 `tests/test_sync_discipline.py` 扫 AST 盯着（控制面 15 个函数、
+`_pump_loop` 的 `ProcessExited` 分支、`_write_loop` 的 `host.write()` → `finally` 扣减）；它们一旦被改掉，
+红的是那条纪律测试，而不是 46 处断言在某台忙机器上偶发失败。
+
+验证（第四轮及其复核结束时全量重跑）：`ruff check` / `ruff format --check` 全绿（49 文件）；`mypy` 全绿（31 源文件）；
+`pytest -q` = **261 passed, 32 skipped**（第四轮修完时 259，复核补的 2 条见上；11s）；
+`TERMINALD_CONTRACT=1 pytest -q -m contract` = **32 passed**（43–77s，波动来自真实 ConPTY 子进程的启动，与本轮无关）。
+前端未改动。
+
+复核补的两条都做过违反注入（结果见判别力表）。另外把 D5 涉及的三个文件——`test_input_backpressure.py`、
+`test_push_window.py`、`test_hub.py`——在改动前后各连跑 **15 轮**（修前 34 passed、修后 35 passed），零红。
+
+---
+
 ## 3. 缺陷 → 回归测试对照
 
 一次性取证脚本（`backend/.audit/*.py`）已随缺陷修复删除；每一项结论现在都由**能在 CI 里跑的**
@@ -757,6 +865,8 @@ C1 这条也把 §2.7.1 的结论补完整了：**未复现的那条 pytest 红�
 | A13 拆除冻结整个服务 | `tests/test_host_teardown.py`（6 条：顺序契约、真进程树终止、纳管失败策略）、`tests/test_hub.py::test_blocked_close_never_stalls_the_event_loop`、`tests/test_api.py::test_deleting_a_session_does_not_freeze_http`、`tests/test_contract_pywezterm.py::test_closing_a_session_kills_the_tree_and_stays_bounded` | `pytest -q tests/test_host_teardown.py` / `TERMINALD_CONTRACT=1 pytest -q -m contract -k tree` |
 | 多客户端逐行同步 | `tests/test_hub.py`（`Endpoint` 强制 offset 首尾相接）+ `probe/multi-client.mjs`（10/10，含“真的滚到了最早一行”的前提断言）、`probe/scrollback.mjs`（6/6，含滚动条存在/贴边/可拖） | `node probe/multi-client.mjs` |
 | 前后端字段形状漂移（V6） | `tests/test_protocol.py::test_server_message_shapes_match_shared_contract` + `src/protocol/frames.test.ts::字段形状与后端生成的契约逐字一致`（两侧都引用同一份 `vectors/shapes.json`） | `pytest -q -k shapes` / `npx vitest run src/protocol` |
+| 等错东西（D5/D7：“写完了”≠“放行了”） | `tests/test_input_backpressure.py::test_input_hold_pauses_sender_without_dropping_bytes`（栅栏改成 `input_held is False`）+ `::test_write_fence_alone_does_not_prove_the_client_was_released`（反向：把通知压后，写栅栏满足而放行没到） | `pytest -q tests/test_input_backpressure.py` |
+| 固定睡眠当同步（D1–D4） | `tests/test_sync_discipline.py`（1 条禁固定睡眠 + 15 条控制面同步性 + 1 条 `EXITED` 原子性 + 1 条写栅栏依据 + 1 条豁免名单防僵化）与 `tests/test_hub.py::test_writes_drained_waits_for_a_gated_write` | `pytest -q -k 'sleep or control_plane or process_exit or write_fence or writes_drained or exemption'`（22 条） |
 
 `probe/` 下**七个探针全部自带服务器**（各自独占一个端口，从 8801 起、被占用就往上找，跑完自己收掉），
 所以它们可以在你正用着 8765 的时候跑，**不会碰你的会话**；想打到已有服务上就设 `PROBE_BASE`（那时会先清空会话）。

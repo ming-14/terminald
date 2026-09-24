@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -24,9 +25,10 @@ from support import (
     make_endpoint,
     make_settings,
     wait_for,
+    writes_drained,
 )
 from terminald.protocol.messages import Attach, Detach, InputHold
-from terminald.runtime.runner import InputVerdict
+from terminald.runtime.runner import InputVerdict, SessionRunner
 from terminald.service.hub import Hub
 
 pytestmark = pytest.mark.asyncio
@@ -68,6 +70,30 @@ async def attach(hub: Hub, client_id: str, session_id: str) -> Endpoint:
     endpoint = make_endpoint(hub, client_id)
     await hub.handle_message(client_id, Attach(session=session_id, resume=None))
     return endpoint
+
+
+def release_notices(endpoint: Endpoint) -> list[InputHold]:
+    """该客户端收到的**放行**消息（`paused=false`）。
+
+    它与 `paused=true` 必须分开看：`paused=true` 只在首次越过水位时下发，而放行要等写
+    线程把队列排水、再经 `call_soon_threadsafe` 回到事件循环——所以“有没有放行”不是
+    “有没有收到 input_hold”，而是“收到的那条是不是 paused=false”。
+    """
+    return [
+        m for m in endpoint.control_of("input_hold") if isinstance(m, InputHold) and not m.paused
+    ]
+
+
+async def fill_to_high_water(hub: Hub, host: BlockingHost, client_id: str) -> None:
+    """把该客户端的输入压到高水位：写线程卡在闸上，队列只进不出。
+
+    到这一刻为止都是确定状态——在水位判定之前入队不产生任何控制消息——所以后续每个
+    判定点（暂缓、放行、越限）都可以直接断言，不需要先“发得够快”。
+    """
+    assert hub.handle_input(client_id, b"x" * CHUNK) is InputVerdict.ACCEPTED
+    await wait_for(host.write_entered.is_set)
+    for _ in range(3):  # 加上闸上那一块，正好 4 × 16 KiB = 高水位
+        hub.handle_input(client_id, b"x" * CHUNK)
 
 
 async def test_input_hold_pauses_sender_without_dropping_bytes() -> None:
@@ -117,18 +143,77 @@ async def test_input_hold_pauses_sender_without_dropping_bytes() -> None:
         # 排水：写线程把队列写完 → 触发放行（经 call_soon_threadsafe 回到事件循环）
         host.write_gate.set()
         await wait_for(lambda: bytes(host.written) == expected)
+        # 但“字节写完了”**不是**放行的栅栏：放行经 `call_soon_threadsafe` 回到事件循环，
+        # 而 `drain_until_quiet()` 是同步的、给不出那一圈。栅栏应当是“该客户端已被放行”
+        # （`_release_input` 先清 `input_held` 再 `_send`，中间无 await，所以标志一变，
+        # `InputHold(paused=false)` 就已入队）。删掉这一句的代价见下面那条用例。
+        await wait_for(lambda: client_of(hub, "a").input_held is False, what="输入暂缓被解除")
 
         endpoint.drain_until_quiet()
-        releases = [
-            m
-            for m in endpoint.control_of("input_hold")
-            if isinstance(m, InputHold) and not m.paused
-        ]
-        assert len(releases) == 1, "放行只发一次（滞回，不随每次写出抖动）"
+        assert len(release_notices(endpoint)) == 1, "放行只发一次（滞回，不随每次写出抖动）"
         assert client_of(hub, "a").input_held is False
 
         # 最硬的一条：8 块全部按原序送达，一个字节都没丢、没有重复
         assert bytes(host.written) == expected
+
+
+async def test_write_fence_alone_does_not_prove_the_client_was_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """「写栅栏已满足」**不等于**「客户端已被放行」——把放行通知压后就能看见这个缺口。
+
+    构造的是那条真实竞态：写线程写完最后一块、放行通知落到事件循环之前被抢占。这里用一道
+    闸把它变成确定状态（与 `BlockingHost.write_gate` 同一手法），于是可以断言：字节全部
+    落到宿主、`pending_bytes` 已经归零，而客户端**仍**是暂缓的、放行一条都没到。
+
+    这条用例存在的理由就是上个用例里那行 `wait_for(input_held is False)`：删掉它，
+    “按写栅栏去断言放行”在这里必然误判——`drain_until_quiet()` 是同步的，给不出事件循环
+    那一圈，于是放行尚未发生也被记成“收到 0 条”。
+    """
+    notice_gate = threading.Event()
+    original_init = SessionRunner.__init__
+
+    def gated_notice(self: SessionRunner, *args: Any, **kwargs: Any) -> None:
+        notify = kwargs.get("on_drained")
+        assert callable(notify), "这个用例要求 Hub 交出放行通知回调（见 Hub._start_session）"
+
+        def late() -> None:
+            notice_gate.wait(timeout=10.0)
+            notify()
+
+        kwargs["on_drained"] = late
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(SessionRunner, "__init__", gated_notice)
+
+    async with congested_hub() as (hub, hosts):
+        sid = (await hub.create_session()).id
+        endpoint = await attach(hub, "a", sid)
+        host = hosts[0]
+        expected = b"x" * (4 * CHUNK)
+
+        await fill_to_high_water(hub, host, "a")
+        endpoint.drain_until_quiet()
+        assert client_of(hub, "a").input_held is True, "到高水位就该暂缓"
+
+        # 排水：字节全部落到宿主（写栅栏已满足），但放行通知停在闸上
+        host.write_gate.set()
+        await writes_drained(hub, sid)
+        assert bytes(host.written) == expected
+        assert client_of(hub, "a").input_held is True, "通知还停在闸上，客户端不该被放行"
+
+        try:
+            endpoint.drain_until_quiet()
+            assert release_notices(endpoint) == [], (
+                "写栅栏满足不等于已放行：此刻放行通知还没送到事件循环"
+            )
+        finally:
+            notice_gate.set()
+
+        # 通知一送到，放行就是可观察的（这与上一个用例的栅栏是同一个条件）
+        await wait_for(lambda: client_of(hub, "a").input_held is False, what="放行通知送达")
+        endpoint.drain_until_quiet()
+        assert len(release_notices(endpoint)) == 1
 
 
 async def test_hold_is_per_client_and_cleared_on_detach() -> None:
@@ -139,10 +224,7 @@ async def test_hold_is_per_client_and_cleared_on_detach() -> None:
         b = await attach(hub, "b", sid)
         host = hosts[0]
 
-        assert hub.handle_input("a", b"x" * CHUNK) is InputVerdict.ACCEPTED
-        await wait_for(host.write_entered.is_set)
-        for _ in range(3):
-            hub.handle_input("a", b"x" * CHUNK)
+        await fill_to_high_water(hub, host, "a")
         a.drain_until_quiet()
         b.drain_until_quiet()
 
