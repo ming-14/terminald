@@ -341,8 +341,11 @@ export class App {
       },
       onMessage: (message) => this.#onMessage(message),
       onError: (error) => {
+        // 这条是**开发者诊断**（帧错位、输入队列溢出、负载类型不认识），原始信息里
+        // 全是协议内部细节，对使用者没有意义，因此只留在控制台；提示条上给一句
+        // 说明「出事了、去哪看」。真正面向用户的文案由服务端下发（见 `case 'error'`）。
         console.error('终端客户端错误:', error);
-        this.#showNotice(`协议错误：${error.message}`);
+        this.#showNotice('终端连接出错了，详情见浏览器控制台。');
       },
     };
   }
@@ -414,8 +417,11 @@ export class App {
       case 'error':
         // 服务端错误不能只落在控制台里：它往往解释了“刚才那一下为什么没反应”
         // （例如输入越限，服务端随即断开）。提示会在下一次成功订阅时清掉。
+        //
+        // `code` 只进控制台：它是给排查用的协议字段名，摆到界面上只会让人读到一个
+        // 看不懂的标识符。面向用户的只有服务端写好的一句话。
         console.error(`服务端错误 ${message.code}: ${message.message}`);
-        this.#showNotice(`服务端错误：${message.message}（${message.code}）`);
+        this.#showNotice(message.message);
         break;
 
       default:

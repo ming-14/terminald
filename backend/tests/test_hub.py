@@ -594,7 +594,7 @@ async def test_attach_unknown_session_reports_failure(hub: Hub) -> None:
     a.drain_until_quiet()
     failure = a.control_of("error")[-1]
     assert isinstance(failure, Failure)
-    assert failure.code == "SessionNotFound"
+    assert failure.code == "session_not_found"
 
 
 async def test_input_is_forwarded_to_host(hub: Hub) -> None:

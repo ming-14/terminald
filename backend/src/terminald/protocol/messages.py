@@ -218,6 +218,17 @@ class InputHold(_Msg):
 
 
 class Failure(_Msg):
+    """服务端拒绝或无法完成某次请求。
+
+    `message` 是**面向使用者**的**一句话**，只说发生了什么（外加一个他当场能做的动作）。
+    它**不得**出现路径、环境变量名、偏移数字、异常类名，也不写「详情见…」这类把人
+    指向别处的话——那些属于服务端日志。纪律见 `docs/protocol.md`，由
+    `tests/test_error_messages.py` 机器检查（禁用词、字数、句号数、假承诺）。
+
+    `code` 是给客户端与排查用的**稳定标识**（形如 `session_name_conflict`），不是
+    Python 异常类名的镜像：类名会随重构改名，而它是协议的一部分。
+    """
+
     t: Literal["error"] = "error"
     code: str
     message: str

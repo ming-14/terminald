@@ -19,6 +19,9 @@
 
 导入是惰性的：缺少 pywezterm 时 `import terminald.runtime.pywezterm_host` 仍必须成功，
 只有真正创建宿主才报 `HostUnavailable`——这样分层测试、纯逻辑单测都不依赖该原生扩展。
+
+依赖位置由 `runtime/vendor.py` 自己解决（向上找仓库里的 `vendor/`），调用方不需要
+预先配 `PYTHONPATH`；真的找不到时才由 `__main__.py` 的启动自检拒绝启动。
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ from typing import Any
 from ..core.errors import HostUnavailable
 from ..core.ports import HostMetadata, SessionSpec
 from ..logs import get_logger
-from . import winjob
+from . import vendor, winjob
 
 _log = get_logger(__name__)
 
@@ -43,16 +46,38 @@ _module: ModuleType | None = None
 _PLACEHOLDER_TITLE = "wezterm"
 
 
+def load_error() -> str | None:
+    """探测依赖是否可导入；可用返回 None，否则返回**面向部署者**的说明。
+
+    这份说明只进服务端日志，所以它要写全：装在哪、缺了什么、怎么补。
+    用户看到的是 `HostUnavailable.user_message` 那句话（见 `core/errors.py`）。
+    """
+    vendor.attach()
+    try:
+        importlib.import_module(_MODULE_NAME)
+    except ImportError as exc:
+        found = vendor.find()
+        where = str(found) if found is not None else "未找到仓库里的 vendor/ 目录"
+        return (
+            f"无法导入 {_MODULE_NAME}（长期依赖，不随 pip 安装）。\n"
+            f"  vendor 目录：{where}\n"
+            f"  包体应位于：{_MODULE_NAME}/pywezterm.pyd 与同目录的 conpty.dll、OpenConsole.exe\n"
+            f"  该环境下的导入错误：{exc}\n"
+            "  怎么补依赖见 vendor/README.md。"
+        )
+    return None
+
+
 def _require_pywezterm() -> ModuleType:
     global _module
     if _module is None:
+        vendor.attach()
         try:
             _module = importlib.import_module(_MODULE_NAME)
         except ImportError as exc:  # pragma: no cover - 取决于环境
-            raise HostUnavailable(
-                f"未找到 {_MODULE_NAME}。它是仓库里的长期依赖 vendor/pywezterm/（不安装）："
-                "把仓库的 vendor/ 加进 PYTHONPATH（见 backend/README.md 的「运行」一节）"
-            ) from exc
+            # `str(exc)` 是**技术细节**（导入错误原文），只进日志；使用者看到的是
+            # `HostUnavailable.user_message` 那一句（见 core/errors.py）。
+            raise HostUnavailable(f"无法导入 {_MODULE_NAME}: {exc}") from exc
     return _module
 
 
@@ -209,4 +234,4 @@ class PyweztermHost:
         )
 
 
-__all__ = ["PyweztermHost"]
+__all__ = ["PyweztermHost", "load_error"]

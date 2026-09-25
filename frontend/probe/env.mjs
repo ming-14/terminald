@@ -30,9 +30,6 @@ export const FRONTEND_DIR = join(REPO_ROOT, 'frontend');
 /** 后端目录（`python -m terminald` 的落点）。 */
 export const BACKEND_DIR = join(REPO_ROOT, 'backend');
 
-/** 长期依赖目录：pywezterm 的包目录 `vendor/pywezterm/` 就在其下（不安装，靠 PYTHONPATH 导入）。 */
-export const VENDOR_DIR = join(REPO_ROOT, 'vendor');
-
 const IS_WINDOWS = process.platform === 'win32';
 
 /** 虚拟环境的解释器（POSIX 与 Windows 的布局不同，探针要能跨平台跑）。 */

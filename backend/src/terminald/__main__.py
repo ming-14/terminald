@@ -78,6 +78,17 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    # 依赖缺失同样是「没有任何后续信号」的错误：不在这里拦住，服务会照常起来、
+    # 照常监听、照常接受连接，直到有人新建会话才失败，而那时它只会变成浏览器上
+    # 一条谁也读不懂的提示。宁可现在就退出，把怎么补依赖讲在日志里。
+    if settings.host_impl == "pywezterm":
+        from .runtime.pywezterm_host import load_error
+
+        problem = load_error()
+        if problem is not None:
+            _log.error("拒绝启动：宿主实现不可用。\n%s", problem)
+            return 2
+
     import uvicorn  # 延迟导入：--help / 配置解析不需要加载服务器
 
     config = uvicorn.Config(

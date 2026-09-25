@@ -24,7 +24,7 @@
 
 | 项 | 结果 |
 |---|---|
-| 后端测试（默认） | `261 passed, 32 skipped`（10 秒内跑完；零固定睡眠，见 §2.9） |
+| 后端测试（默认） | `328 passed, 32 skipped`（10 秒内跑完；零固定睡眠，见 §2.9） |
 | 后端契约测试（真实 pywezterm + ConPTY） | `TERMINALD_CONTRACT=1 pytest -m contract` → **32 passed**（含 A13 拆除路径与输入字节保真两条回归） |
 | `ruff check .` / `ruff format --check .` | 通过（无告警、49 文件已格式化） |
 | `mypy src` | 通过（31 个源文件） |
@@ -81,7 +81,7 @@ cd backend
 #   healthz #0: 18953 ms      ← 整个服务在此期间无法响应
 ```
 
-**根因**：`Hub.handle_input` → `Session.write_input` → `SessionHost.write` → `Pty.write`，而 `Pty.write` 是**阻塞调用**，它是在事件循环线程上被执行的。GIL 已经放掉了（`vendor/pywezterm-upstream/wezterm/pywezterm/src/pty.rs:327` 的 `py.detach`），但**放掉 GIL 并不能让调用线程自己走开**——事件循环线程仍然卡在这一个调用里，于是所有会话的读、所有客户端的发送全部停摆。仓库自己的文档里量过这个量级：ConPTY 下「1 MB ≈ 4s、8 MB ≈ 30s」。
+**根因**：`Hub.handle_input` → `Session.write_input` → `SessionHost.write` → `Pty.write`，而 `Pty.write` 是**阻塞调用**，它是在事件循环线程上被执行的。GIL 已经放掉了（绑定层 `Pty::write` 里的 `py.detach`，源码在 `reference/pywezterm/wezterm/pywezterm/src/pty.rs`），但**放掉 GIL 并不能让调用线程自己走开**——事件循环线程仍然卡在这一个调用里，于是所有会话的读、所有客户端的发送全部停摆。仓库自己的文档里量过这个量级：ConPTY 下「1 MB ≈ 4s、8 MB ≈ 30s」。
 
 **现成的解法就在仓库里**：`SessionRunner` 有一个专用写线程（`runner.py:_write_loop` + `submit_input`），但 `grep -rn "submit_input" backend/src` 显示**没有任何调用点**。
 
@@ -848,6 +848,83 @@ D5 是在 §2.9 的验证阶段**抓出来的**，不是读代码看出来的：
 
 复核补的两条都做过违反注入（结果见判别力表）。另外把 D5 涉及的三个文件——`test_input_backpressure.py`、
 `test_push_window.py`、`test_hub.py`——在改动前后各连跑 **15 轮**（修前 34 passed、修后 35 passed），零红。
+
+---
+
+## 2.10 第五轮（2026-09-25）：依赖不该靠人记，错误文案不该给人看内部细节
+
+起因是一条被贴出来的界面提示：
+
+> 服务端错误：未找到 pywezterm。它是仓库里的长期依赖 vendor/pywezterm/（不安装）：把仓库的 vendor/ 加进 PYTHONPATH（见 backend/README.md 的「运行」一节）（HostUnavailable）
+
+它把两件事做错了，而两件事的根是同一个：**层没分清**。
+
+### 问题一：仓库自带的依赖，却要求调用者记得配环境变量
+
+pywezterm 是仓库的长持依赖（`vendor/pywezterm/`），但要让它可导入，得由**启动命令**带上
+`PYTHONPATH=../vendor`。漏了也不会有人拦：服务照常起来、照常监听、照常接受 WebSocket，
+直到有人点「+」才失败，而那时只表现为浏览器上一条离根因很远的提示。
+
+**修法**：`runtime/vendor.py` 从包自身的位置向上找到仓库里的 `vendor/` 并接进 `sys.path`。
+用 venv 还是系统 Python、从哪个目录起，都不需要任何环境变量。
+
+配套地，`__main__.main()` 加了**启动自检**：`host_impl == "pywezterm"` 时先确认依赖可导入，
+失败就打印「怎么补依赖」并退出码 2——与已有的「只绑回环地址」那条同构，都是**没有任何
+后续信号**的错误，必须在启动那一刻拒绝，而不是留到运行期。
+
+> 排查过程中的一次误判也记下来：最初把「用系统 Python 起的进程」当成了用户的启动方式，
+> 据此断言「你没带 PYTHONPATH」。实际那是用系统 Python 另起的第二个实例（连包都导不到），
+> 真正服务着 8765 的是 venv 起的那个。**结论必须来自进程树而不是单条命令行。**
+> 误判本身没有影响修法——「依赖不该靠外部配置」依然成立——但归因错了一次。
+
+### 问题二：`Failure` 的正文是一段运维备注，不是一句报错
+
+`Failure(code, message)` 直接取 `type(exc).__name__` 与 `str(exc)`，于是报错正文变成了
+「未找到 pywezterm。它是仓库里的长期依赖 vendor/pywezterm/（不安装）：把仓库的 vendor/
+加进 PYTHONPATH（见 backend/README.md 的「运行」一节）」，后面还挂一个「（HostUnavailable）」。
+三个毛病：把处置说明当正文、把人指向他够不着的地方（README 章节、服务端日志）、
+以及拼接痕迹（末尾那个类名）。另外 `SessionNotFound` 没有自定义 `__init__`，
+`str(exc)` 是空串 —— 用户看到的是一条**空白**提示。
+
+**修法**：`core/errors.py` 里每个错误带三层信息，受众不同、不得混用：
+
+| 字段 | 受众 | 内容 |
+|---|---|---|
+| `code` | 客户端 / 排查 | 稳定 snake_case 标识，**不是**类名的镜像（类名会随重构改名，它是协议的一部分） |
+| `user_message` | 浏览器前面的使用者 | **一句话**，只说发生了什么。不写处置说明，不写「详情见…」 |
+| `str(exc)` | 服务端日志 / REST detail | 技术细节（偏移、会话 id、导入错误原文），要多长有多长 |
+
+前端 `app.ts` 同步改掉两处：协议 `error` 只显示服务端给的 `message`（`code` 只进控制台），
+客户端自身的诊断错误（`onError`）不再把原始消息直出。
+（`onError` 那条文案里保留了「详情见浏览器控制台」——控制台是使用者自己按 F12 就能打开的，
+与「详情见服务端日志」不是一回事。）
+
+### 守门
+
+| 防止的退化 | 守门测试 |
+|---|---|
+| 依赖又要靠 `PYTHONPATH` | `tests/test_vendor.py`（5 条：能定位、幂等、换 cwd 与不带 vendor 路径仍定位） |
+| 启动自检被删 / 误伤 `fake` 宿主 | `tests/test_config.py`（缺失→退出 2；`fake` 不该被拦） |
+| `code` 退化成类名、改名破坏协议 | `tests/test_error_messages.py`（snake_case、已知 code 写死对照、不等于类名） |
+| 正文又变成一段运维备注 | 同上：禁用词正则 + **字数与句号数上限** + 禁止「详情见…」 |
+| 正文承诺了没做的事 | 同上：出现「正在/即将/会自动」必须登记在 `KNOWN_FULFILLED_PROMISES` 里 |
+
+后三条同时套在 `api/ws.py` 那五条**传输层**文案上（`WS_MESSAGE_NAMES`）：它们不挂在
+领域错误类上，只按类遍历会漏掉。
+
+这三条是对着旧文案反向验过的（`未找到 pywezterm。它是仓库里的长期依赖…` 103 字、
+`…详情见服务端日志。` 命中「详情见」、`…正在重新载入。` 命中「正在」），不是恒真断言。
+
+顺带删掉一处**不可达**的错误处理：`api/ws.py` 的 `_dispatch_control` 曾在
+`hub.handle_message` 外面再接一层 `except TerminaldError`，而 `Hub.handle_message`
+内部已经兜住了——那层永远进不去；万一哪天 hub 那层被去掉，它还会**重复下发**同一条
+`Failure`。
+
+### 验证
+
+`pytest -q` = **328 passed, 32 skipped**；`TERMINALD_CONTRACT=1 pytest -q -m contract` = **32 passed**；
+`ruff check` / `ruff format --check` / `mypy src` 全绿（32 个源文件）；
+前端 `tsc --noEmit` 通过、`vitest run` **117 passed**、`npm run probe:all` 8/8。
 
 ---
 

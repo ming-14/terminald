@@ -14,9 +14,9 @@
 
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { delimiter, join } from 'node:path';
+import { join } from 'node:path';
 
-import { BACKEND_DIR, PYTHON, VENDOR_DIR } from './env.mjs';
+import { BACKEND_DIR, PYTHON } from './env.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -54,8 +54,8 @@ export async function startServer({ port, env = {} }) {
     cwd: BACKEND_DIR,
     env: {
       ...process.env,
-      // src：后端包本体；vendor：不安装的长期依赖 pywezterm（包在 vendor/pywezterm/）
-      PYTHONPATH: [join(BACKEND_DIR, 'src'), VENDOR_DIR].join(delimiter),
+      // src：后端包本体。长期依赖 pywezterm 由后端自己从 vendor/ 定位，不必拼进来。
+      PYTHONPATH: join(BACKEND_DIR, 'src'),
       TERMINALD_HOST_IMPL: 'pywezterm',
       TERMINALD_LOG_LEVEL: 'WARNING',
       ...env,
