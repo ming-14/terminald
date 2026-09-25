@@ -1,37 +1,44 @@
 /**
- * 尺寸求解：把固定的 `cols × rows` 网格铺进可变的容器。
+ * 尺寸求解：把一个固定的 `cols × rows` 网格放进可变的容器。
  *
  * 这是本项目前端唯一「数学」的地方，所以它被写成**纯函数**：输入容器尺寸与实测的单格比例，
- * 输出字号 / 行高倍数 / 字距。DOM 相关的测量只有 `measureCellAspect` 一个薄封装。
+ * 输出字号。DOM 相关的测量只有 `measureCellAspect` 一个薄封装。
  *
  * ## 为什么字号是因变量
  *
  * `cols` / `rows` 由终端侧决定（见 `docs/architecture.md` §4），浏览器可视面积**永不**参与。
- * 于是前端的任务不是「让终端去适应窗口」，而是「求一个让网格铺满的字号」。字号是结果，
+ * 于是前端的任务不是「让终端去适应窗口」，而是「求一个放得进容器的字号」。字号是结果，
  * 不是输入。
+ *
+ * ## 格子比例恒定，余量留白
+ *
+ * **一格 = 字符本身，不掺任何间距。** 宽度用实测的「单格宽 ÷ 字号」，高度用固定的行高
+ * 倍数——两者都不随容器变化。理由：终端是要拿来比较的界面，同一个 `cols × rows` 在任何
+ * 窗口下都该长得一模一样。
+ *
+ * 这里**不**做「把余量塞进字距或行高来铺满窗口」那套：那样会让字符的间距忽宽忽窄，同一个
+ * 120×30 在大窗口和小窗口里看着像两种字体（实测过：格子宽 ÷ 字号在 0.62~0.90 之间漂）。
+ * 代价是容器宽高比与网格宽高比对不上时只能留白（居中）——刻意如此，字形比例优先于铺满。
  *
  * ## 求解顺序
  *
- * 1. 两个方向上各算一个字号上限：`W / (cols × 单格宽/字号)` 与 `H / (rows × 名义行高)`
+ * 1. 两个方向上各算一个字号上限：`W / (cols × 单格宽/字号)` 与 `H / (rows × 行高倍数)`
  * 2. 取较小者——它决定哪个轴是**受限轴**，另一轴必然有余量
  * 3. 吸附（可选）：**只向下**取到步进的整数倍。向上取会让 `cols × 单格宽 > W` 直接溢出
- * 4. 受限轴：行高倍数精确解出 `H / (rows × fontSize)`，但钳在 `[min, max]`
- *    —— 无限拉大行高只会让字看起来是断开的
- * 5. 另一轴：把余量放进整数像素的字距里（xterm 的 `letterSpacing` 只吃整数），有上限
- * 6. 剩下的余量居中留白。**不拉伸字形**
+ * 4. 余量居中留白
  *
- * 不变量：`usedW <= containerW` 且 `usedH <= containerH`，永远不溢出。
+ * 不变量：`usedW <= containerW` 且 `usedH <= containerH`，永远不溢出；且任意两个容器下解出
+ * 的格子宽高比之差不超过一个像素的取整误差。
  */
 
-/** 名义行高倍数：估第一个字号上限时用的初始值。 */
-export const NOMINAL_LINE_HEIGHT = 1.3;
-/** 行高倍数的合法区间：再小会切字，再大显得断开。 */
-export const MIN_LINE_HEIGHT = 1.05;
-export const MAX_LINE_HEIGHT = 1.6;
 /** 字号吸附步进（px）。 */
 export const SNAP_STEP = 0.5;
-/** 字距上限（px）：超过这个值字符之间就明显脱节了。 */
-export const MAX_LETTER_SPACING = 4;
+
+/**
+ * 行高倍数。**固定值**，不随容器变化——它决定格子的高宽比，而比例必须恒定。
+ * 取 1.3：再小字符会被上下切掉，再大行与行之间显得断开。
+ */
+export const LINE_HEIGHT = 1.3;
 
 export interface LayoutInput {
   readonly containerW: number;
@@ -41,14 +48,10 @@ export interface LayoutInput {
   /** 单格宽 ÷ 字号。必须**实测**，不同字体的比例不同，猜不得。 */
   readonly cellAspect: number;
   readonly snapStep?: number;
-  readonly nominalLineHeight?: number;
-  readonly minLineHeight?: number;
-  readonly maxLineHeight?: number;
-  readonly maxLetterSpacing?: number;
-  /** 允许的最小字号；低于它认为容器装不下，返回 null */
-  readonly minFontSize?: number;
+  /** 行高倍数；默认 `LINE_HEIGHT`。留出入口只是为了让测试能固定它。 */
+  readonly lineHeight?: number;
   /**
-   * 字号上限。实测校正时用它把字号压到「上一轮再退一档」，
+   * 字号上限。实测校正时用它把字号压到「实测溢出比例算出的新上限」，
    * 否则同样的输入会解出同样的字号，校正循环原地打转。
    */
   readonly maxFontSize?: number;
@@ -57,7 +60,6 @@ export interface LayoutInput {
 export interface Layout {
   readonly fontSize: number;
   readonly lineHeight: number;
-  readonly letterSpacing: number;
   readonly cellW: number;
   readonly cellH: number;
   readonly usedW: number;
@@ -70,15 +72,20 @@ export interface Layout {
   readonly snapped: boolean;
 }
 
-function clamp(value: number, low: number, high: number): number {
-  return Math.min(Math.max(value, low), high);
+/** 向下吸附到 0 时退回原值：0 字号渲染不出任何东西。 */
+function positiveOr(value: number, fallback: number): number {
+  return value > 0 ? value : fallback;
 }
 
 /**
- * 求解布局。容器装不下（字号会低于 `minFontSize`）时返回 `null`，
- * 由调用方决定怎么提示——不要偷偷把字号压到看不清。
+ * 求解布局。
+ *
+ * **永远返回一个布局。** 网格尺寸由终端侧定死（见模块头注释），前端无权改，所以这里不
+ * 做「放不下就放弃」这种事：字号是唯一的因变量，容器再小也只是字号跟着小下去，网格始终
+ * 完整地放得进去。容器尺寸非正属于调用方的编程错误（连画布都没有），抛错而不是返回一个
+ * 假布局去骗渲染层。
  */
-export function solveLayout(input: LayoutInput): Layout | null {
+export function solveLayout(input: LayoutInput): Layout {
   const {
     containerW,
     containerH,
@@ -86,11 +93,7 @@ export function solveLayout(input: LayoutInput): Layout | null {
     rows,
     cellAspect,
     snapStep = SNAP_STEP,
-    nominalLineHeight = NOMINAL_LINE_HEIGHT,
-    minLineHeight = MIN_LINE_HEIGHT,
-    maxLineHeight = MAX_LINE_HEIGHT,
-    maxLetterSpacing = MAX_LETTER_SPACING,
-    minFontSize = 6,
+    lineHeight = LINE_HEIGHT,
     maxFontSize,
   } = input;
 
@@ -98,35 +101,28 @@ export function solveLayout(input: LayoutInput): Layout | null {
   if (!Number.isFinite(cellAspect) || cellAspect <= 0) {
     throw new RangeError(`cellAspect 必须为正有限数: ${cellAspect}`);
   }
-  if (containerW <= 0 || containerH <= 0) return null;
+  if (containerW <= 0 || containerH <= 0) {
+    throw new RangeError(`容器尺寸必须为正: ${containerW}×${containerH}`);
+  }
 
   const fsByWidth = containerW / (cols * cellAspect);
-  const fsByHeight = containerH / (rows * nominalLineHeight);
+  const fsByHeight = containerH / (rows * lineHeight);
 
   let fontSize = Math.min(fsByWidth, fsByHeight);
   const snapped = snapStep > 0;
   const floorToStep = (value: number): number =>
     snapStep > 0 ? Math.floor(value / snapStep) * snapStep : value;
   if (snapped) {
-    // 只向下吸附：向上会让网格宽/高超过容器，直接溢出
-    fontSize = floorToStep(fontSize);
+    // 只向下吸附：向上会让网格宽/高超过容器，直接溢出。
+    // 容器小到不足一个步进时取整会得到 0，而 0 字号什么都渲染不出来，退回原值。
+    fontSize = positiveOr(floorToStep(fontSize), fontSize);
   }
   if (maxFontSize !== undefined) {
     // 压上限时同样向下对齐到步进，保持「字号总是步进的整数倍」这个性质
-    fontSize = Math.min(fontSize, floorToStep(maxFontSize));
+    fontSize = Math.min(fontSize, positiveOr(floorToStep(maxFontSize), maxFontSize));
   }
-  if (fontSize < minFontSize) return null;
 
-  const bindingAxis: 'width' | 'height' = fsByWidth <= fsByHeight ? 'width' : 'height';
-
-  const lineHeight = clamp(containerH / rows / fontSize, minLineHeight, maxLineHeight);
-  const letterSpacing = clamp(
-    Math.floor(containerW / cols - fontSize * cellAspect),
-    0,
-    maxLetterSpacing,
-  );
-
-  const cellW = fontSize * cellAspect + letterSpacing;
+  const cellW = fontSize * cellAspect;
   const cellH = fontSize * lineHeight;
   const usedW = cellW * cols;
   const usedH = cellH * rows;
@@ -134,14 +130,13 @@ export function solveLayout(input: LayoutInput): Layout | null {
   return {
     fontSize,
     lineHeight,
-    letterSpacing,
     cellW,
     cellH,
     usedW,
     usedH,
     padX: Math.max(0, containerW - usedW) / 2,
     padY: Math.max(0, containerH - usedH) / 2,
-    bindingAxis,
+    bindingAxis: fsByWidth <= fsByHeight ? 'width' : 'height',
     snapped,
   };
 }

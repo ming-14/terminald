@@ -52,6 +52,16 @@ const FOCUS_OUT = '\u001b[O';
 const MONO_STACK =
   '"Cascadia Mono", "Cascadia Code", Consolas, "Sarasa Mono SC", "Noto Sans Mono CJK SC", "Microsoft YaHei Mono", monospace';
 
+/**
+ * 字号 chip 的显示文本。
+ *
+ * 窗口极小时字号会落到 1px 以下，那时 `toFixed(1)` 会把 0.4px 显示成「0.0px」，
+ * 看起来像什么都没渲染。
+ */
+function formatFontSize(fontSize: number): string {
+  return `${fontSize < 1 ? fontSize.toFixed(2) : fontSize.toFixed(1)}px`;
+}
+
 /** 深色单主题。ANSI 16 色按 GitHub Dark 系调过，保证亮色在深底上可辨。 */
 const THEME = {
   background: '#0a0d12',
@@ -525,7 +535,7 @@ export class App {
   }
 
   /**
-   * 顶部提示浮层：断线、服务端错误、尺寸装不下这类“必须让人看见”的信息。
+   * 顶部提示浮层：断线、服务端错误、字体度量异常这类“必须让人看见”的信息。
    *
    * 只负责显示。清掉它的是**重新订阅成功**那条路径（见 `#notice.classList.add('hidden')`
    * 的调用点）：提示在问题解决之前不该自己消失。
@@ -538,7 +548,7 @@ export class App {
   /**
    * 一次性操作的结果提示（复制、全屏失败这类），几秒后自己消失。
    *
-   * 与 `#notice` 分工：`#notice` 表达的是「问题解决之前不该消失的状态」（断线、尺寸装不下）；
+   * 与 `#notice` 分工：`#notice` 表达的是「问题解决之前不该消失的状态」（断线、字体度量异常）；
    * 这里是一次动作的结果，看过就该走。**成功不提示**——选区消失本身就是反馈，
    * 而失败必须说出来（`navigator.clipboard.writeText` 会在文档失焦时被拒）。
    */
@@ -683,6 +693,8 @@ export class App {
   #fit(): void {
     if (this.#canonicalSize === null) return;
     const { cols, rows } = this.#canonicalSize;
+    // 容器尺寸为 0 是「还没有画布」（窗口最小化、尚未完成布局），不是「装不下」：
+    // 没有可求解的尺寸，交给下一次 ResizeObserver。
     if (this.#host.clientWidth === 0 || this.#host.clientHeight === 0) return;
 
     // 单格比例只量一次（字体不变则比例不变）。量不到可信值时必须报警，
@@ -705,15 +717,8 @@ export class App {
     });
 
     setText(this.#chipSize, `${cols}×${rows}`);
-    if (result.layout !== null) {
-      setText(this.#chipFont, `${result.layout.fontSize.toFixed(1)}px`);
-    }
-
-    if (!result.ok) {
-      this.#notice.textContent = `窗口装不下 ${cols}×${rows} 的终端网格。\n请放大窗口，或调小服务端的 --cols/--rows。`;
-      this.#notice.classList.remove('hidden');
-      return;
-    }
+    setText(this.#chipFont, formatFontSize(result.layout.fontSize));
+    // 字号没有下限，容器再小也只是字号变小：网格一定完整铺得进去，无条件走渲染
     this.#notice.classList.add('hidden');
     // 居中要按**实测**的渲染尺寸算，不能按模型算出来的 usedW——两者可能差一两个像素
     const rendered = measureRenderedScreen(this.#term.element);
@@ -721,7 +726,7 @@ export class App {
     if (result.corrections > 0) {
       // 校正发生了说明「我们的度量」与「xterm 的度量」有出入，值得知道而不是悄悄咽掉
       console.info(
-        `尺寸校正 ${result.corrections} 次：渲染尺寸比模型大，已退让字号`,
+        `尺寸校正 ${result.corrections} 次：渲染尺寸比模型大，已缩小字号`,
         result.overflow,
       );
     }

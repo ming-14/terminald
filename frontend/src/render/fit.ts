@@ -5,27 +5,37 @@
  * 有它自己的字符度量与取整方式。两者理论上应该一致，实际会因为字体回退、亚像素舍入、
  * `lineHeight` 的取整方式而差一点点。差一点点在 120 列的网格上就是可见的溢出或裁切。
  *
- * 所以流程是「求解 → 应用 → 量渲染结果 → 不满足就退一档重来」，有界循环。校正发生时把
- * 次数与差值报出来，而不是悄悄修掉——那说明模型与真实度量不一致，值得知道。
+ * 校正的做法是**按实测的溢出比例直接求新字号**，而不是一档一档地退：网格尺寸与字号近似
+ * 线性，所以 `新字号 = 旧字号 × min(容器宽 / 网格宽, 容器高 / 网格高)` 基本一轮就落到目标
+ * 上。有限轮数只用来兜住取整留下的尾巴。
+ *
+ * **这里没有「装不下」这种结果。** 字号没有下限，容器小就只是字号跟着小，网格始终完整地
+ * 铺在里面；所以对外只报「最终布局 + 校正次数」，不存在成功与失败之分。
  */
 
 import { solveLayout, type Layout } from './size.js';
 
-/** 校正时每轮退多少字号。与吸附步进一致，保证字号始终落在 0.5 的整数倍上。 */
-const CORRECTION_STEP = 0.5;
+/** 校正轮数上限。按比例缩放通常一两轮收敛，这里只兜住取整造成的尾巴。 */
 const MAX_ATTEMPTS = 8;
+
+/**
+ * 缩放失效时的强制退让比例。
+ *
+ * 取整会把「按比例缩出来的字号」顶回原值（量出来的网格尺寸是整数像素，缩完可能仍落在
+ * 同一档），那样循环就不推进了。此时强制按比例退一点，保证每一轮都在往小的方向走。
+ */
+const FORCE_STEP = 0.95;
 
 /**
  * fitTerminal 只用到 xterm 的这几个成员，抽出来是为了能注入替身做测试。
  *
- * 三个 option 声明为可选，是为了兼容 xterm 的 `ITerminalOptions`（它们都是可选的）；
+ * 两个 option 声明为可选，是为了兼容 xterm 的 `ITerminalOptions`（它们都是可选的）；
  * 本模块只写入不读取，所以可选不影响正确性。
  */
 export interface FitTerminalLike {
   readonly options: {
     fontSize?: number;
     lineHeight?: number;
-    letterSpacing?: number;
   };
   resize(cols: number, rows: number): void;
 }
@@ -38,108 +48,80 @@ export interface FitOptions {
   /** 量「渲染出来的网格」的实际像素尺寸 */
   readonly measureScreen: () => { width: number; height: number };
   readonly snapStep?: number;
-  readonly minFontSize?: number;
 }
 
 export interface FitResult {
-  readonly ok: boolean;
-  readonly layout: Layout | null;
-  /** 为了不溢出而额外退让的次数；0 表示模型与实测一致 */
+  readonly layout: Layout;
+  /** 为贴合实测而缩小字号的次数；0 表示模型与实测一致 */
   readonly corrections: number;
-  /** 最终渲染尺寸与容器的差值（正数表示溢出） */
+  /** 最终渲染尺寸与容器的差值（正数表示溢出；收敛后两轴都是 0） */
   readonly overflow: { width: number; height: number };
-  readonly reason?: string;
 }
 
 const EPS = 0.5; // 允许半个像素的取整误差
 
 /**
- * 求解并应用布局。返回 `ok=false` 时表示容器装不下这个网格（字号会低于下限）。
+ * 求解并应用到终端。
  *
- * 注意这里**不做**「把 cols/rows 改成容器装得下的值」这种事：网格尺寸是终端侧定的，
- * 前端无权改。装不下就是装不下，由调用方去提示。
+ * 网格尺寸由终端侧决定，前端无权改（见 `size.ts` 模块头注释），所以这里的输入只有容器
+ * 尺寸：容器多小都会返回一个布局，只是字号更小。
  */
 export function fitTerminal(
   host: { readonly clientWidth: number; readonly clientHeight: number },
   term: FitTerminalLike,
   options: FitOptions,
 ): FitResult {
-  const {
-    cols,
-    rows,
-    cellAspect,
-    measureScreen,
-    snapStep = CORRECTION_STEP,
-    minFontSize = 6,
-  } = options;
+  const { cols, rows, cellAspect, measureScreen, snapStep } = options;
 
   const containerW = host.clientWidth;
   const containerH = host.clientHeight;
 
-  let maxFontSize: number | undefined;
-  let lastLayout: Layout | null = null;
-  let lastOverflow = { width: Number.NaN, height: Number.NaN };
-  let corrections = 0;
-  let reason: string | undefined;
-
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-    const layout = solveLayout({
+  const solve = (maxFontSize?: number): Layout =>
+    solveLayout({
       containerW,
       containerH,
       cols,
       rows,
       cellAspect,
-      snapStep,
-      minFontSize,
+      ...(snapStep === undefined ? {} : { snapStep }),
       ...(maxFontSize === undefined ? {} : { maxFontSize }),
     });
-    if (layout === null) {
-      reason = '容器装不下这个网格（字号会低于下限）';
-      break;
-    }
-    lastLayout = layout;
 
+  let layout = solve();
+  let corrections = 0;
+  let overflow = { width: Number.NaN, height: Number.NaN };
+
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     term.options.fontSize = layout.fontSize;
     term.options.lineHeight = layout.lineHeight;
-    term.options.letterSpacing = layout.letterSpacing;
+    // 字距不动它：格子宽度就该等于字符宽度本身，掺间距会让字形比例随窗口漂（见 size.ts）
     // 网格尺寸由终端侧决定，所以我们显式设定，而不是让 xterm 去 fit 容器
     term.resize(cols, rows);
 
     const screen = measureScreen();
-    lastOverflow = {
+    overflow = {
       width: screen.width - containerW,
       height: screen.height - containerH,
     };
-    if (lastOverflow.width <= EPS && lastOverflow.height <= EPS) {
-      return {
-        ok: true,
-        layout,
-        corrections,
-        overflow: { width: Math.max(0, lastOverflow.width), height: Math.max(0, lastOverflow.height) },
-      };
-    }
+    // 量不到渲染尺寸时 screen 是 0，差值必然为负，同样从这里收敛退出
+    if (overflow.width <= EPS && overflow.height <= EPS) break;
 
-    // 渲染结果比算出来的大 → 退一档字号重来。用 maxFontSize 把下限带进下一轮求解，
-    // 否则同样的输入会解出同样的字号，循环原地打转。
     corrections += 1;
-    const next = layout.fontSize - CORRECTION_STEP;
-    if (next < minFontSize) {
-      reason = '实测渲染尺寸持续溢出，字号已到下限';
-      break;
-    }
-    maxFontSize = next;
+    const scale = Math.min(containerW / screen.width, containerH / screen.height);
+    const scaled = layout.fontSize * scale;
+    // 缩放没能把字号推下去（被取整顶回来了）就强制退让，保证循环一定在推进
+    const capped = scaled < layout.fontSize - 1e-6 ? scaled : layout.fontSize * FORCE_STEP;
+    layout = solve(capped);
   }
 
   return {
-    ok: false,
-    layout: lastLayout,
+    layout,
     corrections,
+    // 余量对调用方没有意义，只报实际超出的部分
     overflow: {
-      width: Math.max(0, lastOverflow.width),
-      height: Math.max(0, lastOverflow.height),
+      width: Math.max(0, overflow.width),
+      height: Math.max(0, overflow.height),
     },
-    // 循环耗尽也必须给原因：调用方要据此提示，沉默的失败等于没失败
-    reason: reason ?? `连续 ${MAX_ATTEMPTS} 次校正后仍然溢出`,
   };
 }
 
