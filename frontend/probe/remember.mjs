@@ -255,20 +255,20 @@ async function main() {
     await waitForText(page, 'REMEMBER_NEW_OK', 30_000);
     check('新建的会话可交互', true);
 
-    // ---- 8. 备用屏幕：在这个平台上**不可达**，这里只钉住这个事实
+    // ---- 8. 备用屏幕：侧载宿主会转发 `?1049h`，所以**现在可达**
     //
     // 前端的滚动位置记忆对备用屏是关掉的（备用屏没有 scrollback，行号一退出就失效）。
-    // 但 Win10 的 ConPTY 会把子进程的 `?1049h` 吃掉（对照组实测见
-    // `probe/conpty-alt-screen.mjs`：同样的子进程走管道时序列在、走 ConPTY 时不在），
-    // 所以终端永远不会进备用缓冲区——写一个「备用屏里滚动不写记忆」的断言在这里**恒真**，
-    // 等于没测。老实断言平台事实，比留一个假的绿灯有用。
+    // 这条曾经测不了：系统 conhost 把子进程的 `?1049h` 吃掉，终端永远进不了备用缓冲区，
+    // 于是「备用屏里不写记忆」的断言**恒真**。2026-09-25 侧载 OpenConsole 生效后这个序列会
+    // 到达客户端（逐条实测见 `probe/conpty-modes.mjs`），所以这里换成钉住前提本身：
+    // 客户端确实进了备用缓冲区 —— 前提不成立时，后面那条保护就无从谈起。
     const alt = await createSession(BASE, 'rm-alt', altScreen());
     await selectSession(page, 'rm-alt');
     await waitForText(page, 'ALT-SCREEN-UP');
     const altState = await debugState(page);
     check(
-      '备用屏在当前平台不可达（ConPTY 吞掉 ?1049h，见 probe/conpty-alt-screen.mjs）',
-      !altState.altScreen,
+      '请求备用屏的会话让客户端进了备用缓冲区（宿主转发了 ?1049h，见 probe/conpty-modes.mjs）',
+      altState.altScreen,
       `altScreen=${String(altState.altScreen)} session=${String(altState.session)}`,
     );
     check(

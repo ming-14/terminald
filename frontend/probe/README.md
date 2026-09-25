@@ -43,7 +43,7 @@ PROBE_OUT=/tmp/probe-shots node probe/smoke.mjs   # 换个落盘目录
 | `remember.mjs` | 8802 | 刷新后仍在原会话、视口回到同一行且那一屏逐行一致、底部不被强行拽回、切会话不混屏、新建会话清屏且可交互 |
 | `input-hold.mjs` | 8801 | 输入背压在 UI 上可见（顶栏「输入排队中」）、被暂缓期间**一帧不发**、被暂缓住仍能切会话并在新会话里干活 |
 | `shortcuts.mjs` | 8803 | F11 全屏且不往 PTY 塞字节、Ctrl+C 仅在有选区时复制、Ctrl+V 真的把剪贴板送进终端、有选区右键直接复制 |
-| `conpty-alt-screen.mjs` | 8804 | 平台事实的对照组：ConPTY 吞掉子进程的 `\x1b[?1049h`（管道下原样存在）——说明「备用屏里不记滚动位置」这条保护在当前平台无法端到端验证 |
+| `conpty-modes.mjs` | 8804 | 平台事实表：宿主（侧载的 OpenConsole）把子进程的**哪些模式序列**转给客户端——23 条逐条断言，外加管道对照（子进程确实写了）与空会话对照（区分「宿主自发」）。换宿主就会红；`docs/architecture.md` §12 那张表由它守着 |
 
 `input-hold.mjs` 在采样前会**重新确认**「此刻仍被暂缓」（必要时再压一批把水位顶起来）：
 暂缓窗口的长度里含 ConPTY 自己的输入缓冲，它会偶发地把整段粘贴一次吞掉并放行——
@@ -52,7 +52,8 @@ PROBE_OUT=/tmp/probe-shots node probe/smoke.mjs   # 换个落盘目录
 ## 共用件
 
 - `all.mjs`：依次跑完全部探针并汇总退出码（`npm run probe:all` 的落点）。
-- `env.mjs`：仓库布局（由文件位置推导）、解释器与 Chromium 的定位、`CHROMIUM_ARGS`
+- `env.mjs`：仓库布局（由文件位置推导）、解释器与 Chromium 的定位、`VENDOR_DIR`（不安装的长期依赖
+  `vendor/pywezterm/` 所在目录，探针起服务时把它拼进 `PYTHONPATH`）、`CHROMIUM_ARGS`
   （无头 Chromium 默认没有 GPU，不给它 `--enable-unsafe-swiftshader` 就拿不到 WebGL2 上下文，
   页面会**静默退回 DOM 渲染器**——那时 `glyphs.mjs` 测的就不是它想测的那条渲染路径）、
   落盘目录、shell 与 `shellCommand()`。**探针里不允许再出现写死的绝对路径或用户目录**。

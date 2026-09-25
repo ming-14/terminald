@@ -43,8 +43,5 @@ local.toml
 .env
 .env.*
 
-# === 上游源码副本的构建缓存（1.3 GB，可重建，绝不入库）===
-/vendor/pywezterm-upstream/target/
-/vendor/pywezterm-upstream/wezterm/target/
-
-# 注意：vendor/wheels/*.whl 是刻意纳入版本控制的运行时依赖，不要忽略
+# 运行时依赖的二进制包目录：**不进版本控制**（由 reference/pywezterm 重建后放到这里）
+/vendor/pywezterm/

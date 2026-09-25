@@ -50,8 +50,8 @@ def _require_pywezterm() -> ModuleType:
             _module = importlib.import_module(_MODULE_NAME)
         except ImportError as exc:  # pragma: no cover - 取决于环境
             raise HostUnavailable(
-                f"未找到 {_MODULE_NAME}。请先安装本地 wheel："
-                "pip install vendor/wheels/pywezterm-0.1.0-cp38-abi3-win_amd64.whl"
+                f"未找到 {_MODULE_NAME}。它是仓库里的长期依赖 vendor/pywezterm/（不安装）："
+                "把仓库的 vendor/ 加进 PYTHONPATH（见 backend/README.md 的「运行」一节）"
             ) from exc
     return _module
 

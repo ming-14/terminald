@@ -9,9 +9,9 @@ description = "Web terminal daemon — pywezterm-backed persistent sessions over
 readme = "README.md"
 requires-python = ">=3.11"
 
-# 注意：pywezterm 不在 PyPI 上，它是本仓库 vendor/wheels/ 里的本地 wheel，
+# 注意：pywezterm 不在 PyPI 上、也**不安装**，它是本仓库的长期依赖 vendor/pywezterm/，
 # 因此**不能**写进 dependencies（否则 pip install -e . 必然失败）。
-# 正确顺序见 backend/README.md：先装 vendor wheel，再装本项目。
+# 靠 PYTHONPATH 指到 vendor/ 才能导入，见 backend/README.md 与下面的 pythonpath。
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",
@@ -38,9 +38,10 @@ terminald = "terminald.__main__:main"
 packages = ["src/terminald"]
 
 # ---------------------------------------------------------------- pytest
-# pythonpath 让 tests/ 无需 pip install -e 即可导入 src/terminald
+# pythonpath 让 tests/ 无需 pip install -e 即可导入 src/terminald；
+# ../vendor 提供不安装的长期依赖 pywezterm（包体在 vendor/pywezterm/）
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "../vendor"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 # 用例里大量依赖「等某个条件成立」，一旦条件永不成立就会永久阻塞而不是失败。

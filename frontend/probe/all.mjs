@@ -27,7 +27,7 @@ const PROBES = [
   'remember',
   'input-hold',
   'shortcuts',
-  'conpty-alt-screen',
+  'conpty-modes',
 ];
 
 const failed = [];
