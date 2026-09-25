@@ -23,8 +23,9 @@ api ──→ service ──→ runtime ──→ core ──→ protocol
 
 ## 环境装配
 
-pywezterm **不在 PyPI 上**，它是仓库 `vendor/wheels/` 里的本地 wheel，所以**必须先装 wheel、
-再装本项目** —— 反过来装必然失败。
+pywezterm **不在 PyPI 上**，也**不安装**：它是仓库里的长期依赖，包目录在 `../vendor/pywezterm/`，
+靠 `PYTHONPATH` 指到 `vendor/` 让它可导入（测试由 `pyproject.toml` 的 `pythonpath` 自动带上，
+见「跑测试」）。
 
 ```bash
 cd backend
@@ -32,16 +33,14 @@ cd backend
 # 1. 建虚拟环境
 python -m venv .venv
 
-# 2. 先装本地 wheel（Windows / Python 3.11+，abi3）
-./.venv/Scripts/python.exe -m pip install ../vendor/wheels/pywezterm-0.1.0-cp38-abi3-win_amd64.whl
-#   POSIX 上是 ./.venv/bin/python
-
-# 3. 再装本项目与开发依赖
+# 2. 装本项目与开发依赖（pywezterm 不装，见下）
 ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
+#   POSIX 上是 ./.venv/bin/python
 ```
 
-> 第 2 步不能省。`pyproject.toml` 的 `dependencies` 里刻意**没有** pywezterm——写进去会让
-> `pip install -e .` 因为找不到 PyPI 包而失败。
+> `pyproject.toml` 的 `dependencies` 里刻意**没有** pywezterm——写进去会让 `pip install -e .`
+> 因为找不到 PyPI 包而失败。它的包体在 `../vendor/pywezterm/`，运行与测试时由 `PYTHONPATH`
+> 提供（测试另有 `pyproject.toml` 的 `pythonpath = ["src", "../vendor"]` 兜住）。
 
 ### 前端构建产物
 
@@ -105,8 +104,9 @@ python -m venv .venv
 ## 运行
 
 ```bash
-# 真实宿主（默认）
-./.venv/Scripts/python.exe -m terminald --port 8765
+# 真实宿主（默认）。PYTHONPATH 指到仓库的 vendor/：pywezterm 从那里导入，不安装
+PYTHONPATH=../vendor ./.venv/Scripts/python.exe -m terminald --port 8765
+#   PowerShell：$env:PYTHONPATH='../vendor'; ./.venv/Scripts/python.exe -m terminald --port 8765
 
 # 只接受回环地址：当前版本没有认证，绑到其它地址会被拒绝启动
 ```

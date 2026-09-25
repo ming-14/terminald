@@ -12,7 +12,7 @@
 | `backend/` | 已完成。`ruff` + `ruff format` + `mypy --strict` + `pytest` 四道全绿（261 通过 + 32 个真实宿主契约测试） |
 | `frontend/` | 已完成。`tsc --strict` + 117 个 vitest + 八个真实浏览器探针（共 107 项断言）全通过 |
 | `docs/` | `architecture.md`、`protocol.md`、`design/frontend-draft.html`、`audit.md`（四轮审计报告：产品缺陷 A1–A13、验证层缺陷 V1–V6、交付前清理 C1–C9、测试同步纪律 D1–D7）已就位 |
-| `vendor/` | 本地 wheel 与上游源码副本已就位 |
+| `vendor/` | 长期依赖已就位：`vendor/pywezterm/`（pywezterm 的包目录，**不安装**，运行/测试时把 `vendor/` 加进 PYTHONPATH） |
 
 后端已验证到「真实 ConPTY 子进程 → 输出字节 → WS 客户端 → 浏览器渲染」的完整往返；
 前端另有真 Chromium 探针覆盖挂载、布局、会话切换、键盘输入往返、刷新续传。
@@ -23,8 +23,9 @@
 backend/    后端（FastAPI + WebSocket + pywezterm），见 backend/README.md
 frontend/   前端（xterm.js v6 + TS + Vite），见 frontend/README.md
 docs/       架构与协议说明、前端设计稿
-vendor/     pywezterm 的本地 wheel（PyPI 上没有）与上游源码副本
-reference/  只读参考资料（xterm.js 文档、pywezterm 源码与库测试）——不进版本控制
+vendor/     长期依赖：`vendor/pywezterm/`（pywezterm 的包目录，不安装，靠 PYTHONPATH 导入）
+reference/  只读参考资料：上层 pywezterm 仓库（带 .git，可实时推送）、上游快照、wheel 存档、
+            xterm.js 文档 —— 不进版本控制
 .research/  只读调研材料（tmux / ttyd 源码）——不进版本控制
 ```
 
@@ -33,20 +34,20 @@ reference/  只读参考资料（xterm.js 文档、pywezterm 源码与库测试�
 前置：Python 3.11+、Node.js 20+。
 
 ```bash
-# 后端
+# 后端（pywezterm 不放 PyPI、也不安装：新克隆里 vendor/pywezterm/ 是空的，先见 vendor/README.md）
 cd backend
 python -m venv .venv
-./.venv/Scripts/python.exe -m pip install ../vendor/wheels/pywezterm-0.1.0-cp38-abi3-win_amd64.whl
-./.venv/Scripts/python.exe -m pip install -e ".[dev]"
+./.venv/Scripts/python.exe -m pip install -e ".[dev]"   # pywezterm 不装：它是 vendor/pywezterm/
 
 # 前端（构建产物直接写进后端包内）
 cd ../frontend
 npm install
 npm run build
 
-# 跑起来
+# 跑起来（PYTHONPATH 指到仓库的 vendor/：pywezterm 从那里导入，不安装）
 cd ../backend
-./.venv/Scripts/python.exe -m terminald --port 8765
+PYTHONPATH=../vendor ./.venv/Scripts/python.exe -m terminald --port 8765
+#   PowerShell：$env:PYTHONPATH='../vendor'; ./.venv/Scripts/python.exe -m terminald --port 8765
 ```
 
 打开 <http://127.0.0.1:8765/>，点侧栏标题栏右侧的 `+` 新建一个会话。接口文档在 `/api/docs`。
