@@ -46,6 +46,19 @@ export const PYTHON =
 export const SHELL =
   process.env['COMSPEC'] ?? (IS_WINDOWS ? 'cmd.exe' : (process.env['SHELL'] ?? '/bin/sh'));
 
+/**
+ * 启动 Chromium 的公共参数。
+ *
+ * `--enable-unsafe-swiftshader`：无头 Chromium 默认没有 GPU，`getContext('webgl2')` 直接返回
+ * null。而前端的渲染器就搭在 WebGL2 上（见 `src/ui/app.ts`），拿不到上下文时它会**静默退回**
+ * DOM 渲染器——探针照旧跑得起来，但测的是另一条渲染路径，于是方块/盒线那几条断言会假绿。
+ * 所以这条参数不是优化，是让探针真的测到它想测的那条路（探针默认只收 `console.error`，
+ * 这条回退只发 `console.warn`，不会被自动拦住——见 `probe/glyphs.mjs` 的对照组）。
+ *
+ * 只提供值，不替各探针启动浏览器：启动参数留在各自的 `chromium.launch()` 里看得见。
+ */
+export const CHROMIUM_ARGS = ['--enable-unsafe-swiftshader'];
+
 /** 用 `SHELL` 跑一条一次性命令的完整 argv（Windows 与 POSIX 的开关不同）。 */
 export function shellCommand(command) {
   return [SHELL, IS_WINDOWS ? '/c' : '-c', command];

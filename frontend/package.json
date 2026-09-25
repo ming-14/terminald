@@ -13,6 +13,7 @@
     "probe:all": "node probe/all.mjs"
   },
   "dependencies": {
+    "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0"
   },
   "devDependencies": {

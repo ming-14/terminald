@@ -10,6 +10,7 @@
  *    行号记在 `sessionStorage` 里（见 `remember.ts`），不在服务端
  */
 
+import { WebglAddon } from '@xterm/addon-webgl';
 import { Terminal } from '@xterm/xterm';
 
 import {
@@ -249,6 +250,28 @@ export class App {
     this.#host.addEventListener('copy', (event) => shortcuts.handleCopy(event));
 
     this.#term.open(this.#host);
+
+    // 换掉默认的 DOM 渲染器。理由只有一个，但很硬：**方块与盒线字符只有非 DOM 渲染器才会
+    // 自绘几何填满字符格**（U+2500–257F 盒线、U+2580–259F 方块、U+E0A0–E0BF powerline）。
+    // DOM 渲染器把这些字符交给字体，而我们的行高是固定 1.3 倍（见 render/size.ts），格子比
+    // 字形高——竖着叠两个 `█` 必然留一条横缝。原生的 `customGlyphs` 选项救不了，官方文档
+    // 明写它对 DOM 渲染器无效。
+    //
+    // 必须挂在 `open()` 之后：addon 要拿已挂载的元素建 canvas。
+    const webgl = new WebglAddon();
+    // 上下文会被浏览器丢弃（OOM、系统休眠）。不接管的话画面直接变黑，而且没有任何线索。
+    // 销毁即退回 DOM 渲染器——这是 xterm 自己的约定（addon 的 dispose 会重建 DOM 渲染器）。
+    webgl.onContextLoss(() => webgl.dispose());
+    try {
+      this.#term.loadAddon(webgl);
+    } catch (error) {
+      // 拿不到 WebGL2 上下文时 addon 会抛（无头浏览器没开软件渲染、老显卡、驱动黑名单）。
+      // 这里必须接住：让整个终端起不来，比「字画得出来但方块可能留缝」糟得多。
+      // 但退到另一条渲染路径**不能是静默的**——所以既发告警，也由探针钉住：
+      // probe/glyphs.mjs 断言 canvas 层真的在，退回 DOM 渲染器的分支则被它当对照组跑来验证。
+      console.warn('WebGL 渲染器不可用，退回 DOM 渲染器:', error);
+    }
+
     // 让 .xterm 自己铺满容器：xterm 会按网格把 .xterm 设成「网格那么大」，于是一旦容器比
     // 网格宽，滚动条（.xterm-viewport 自带 overflow-y: scroll）就会悬在离右边缘 90 多像素的
     // 位置。铺满之后滚动条贴右边缘，网格则单独居中（见 #placeGrid）。
@@ -733,6 +756,21 @@ export class App {
   }
 
   /**
+   * 视口每行文本。见 `debugState().screenLines` 的说明。
+   *
+   * 与 DOM 行容器取到的文本对齐：左边按下标定位、右端空白裁掉（DOM 那边是逐格拼出来的，
+   * 结尾空白本来就看不见）。行号从 `viewportY` 起算，与 DOM 的行容器下标一一对应。
+   */
+  #screenLines(): string[] {
+    const buffer = this.#term.buffer.active;
+    const lines: string[] = [];
+    for (let y = 0; y < this.#term.rows; y += 1) {
+      lines.push(buffer.getLine(buffer.viewportY + y)?.translateToString(true) ?? '');
+    }
+    return lines;
+  }
+
+  /**
    * 只读诊断快照：浏览器控制台与真实浏览器探针都用它读取**真实生效**的值。
    *
    * 存在的理由是这类值没法从 DOM 上看出来——比如 `scrollback` 只影响能往回滚多远，
@@ -759,6 +797,17 @@ export class App {
     hasSelection: boolean;
     /** 选区文本长度。 */
     selectionLength: number;
+    /**
+     * 视口每行文本（右端空白已裁）。
+     *
+     * 加它是因为渲染器换了：WebGL 渲染器会 dispose 掉 DomRenderer，而 `.xterm-rows` 是
+     * DomRenderer 的元素——换完 DOM 里就**没有**任何屏幕文本了（探针原先全读它）。
+     * 于是屏幕文本与 `scrollback`/`modes` 归为同一类：DOM 里看不出来，只能从这里读。
+     *
+     * 边界要说清楚：它读的是**模型里的文本**，不证明那段文字被画到了像素上。像素那一层
+     * 由探针自己读屏幕守（`probe/glyphs.mjs` 的逐格空洞统计，以及 smoke 里的非底色像素数）。
+     */
+    screenLines: string[];
   } {
     const modes = this.#term.modes;
     const buffer = this.#term.buffer.active;
@@ -771,6 +820,7 @@ export class App {
       connection: this.#connection,
       viewportY: buffer.viewportY,
       baseY: buffer.baseY,
+      screenLines: this.#screenLines(),
       altScreen: buffer.type === 'alternate',
       inputHeld: this.#client.inputHeld,
       heldInputBytes: this.#client.heldInputBytes,

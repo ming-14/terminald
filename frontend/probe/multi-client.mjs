@@ -15,7 +15,8 @@
 
 import { chromium } from 'playwright-core';
 
-import { PYTHON, chromiumExecutable } from './env.mjs';
+import { CHROMIUM_ARGS, PYTHON, chromiumExecutable } from './env.mjs';
+import { screenLines, waitForText } from './screen.mjs';
 import { createSession, resetSessions, startServer, summarize } from './server.mjs';
 
 const CHROME = chromiumExecutable();
@@ -30,15 +31,14 @@ function check(name, ok, detail = '') {
 /** 等两帧，让渲染追上 DOM。 */
 const RAF2 = `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))`;
 
-/** 可见屏幕的逐行文本（行 = xterm 的物理行）。 */
+/** 可见屏幕的逐行文本（行 = xterm 的物理行）。取自终端模型，见 `screen.mjs` 顶部说明。 */
 async function screenRows(page) {
-  return await page.evaluate(`(async () => {
+  await page.evaluate(`(async () => {
     const viewport = document.querySelector('.xterm-viewport');
     if (viewport) viewport.scrollTop = viewport.scrollHeight;
     await ${RAF2};
-    const rows = document.querySelector('.xterm-rows');
-    return rows ? [...rows.children].map((row) => row.textContent ?? '') : null;
   })()`);
+  return await screenLines(page);
 }
 
 /**
@@ -79,11 +79,8 @@ async function topRows(page) {
     await page.waitForTimeout(150);
   }
 
-  return await page.evaluate(`(async () => {
-    await ${RAF2};
-    const rows = document.querySelector('.xterm-rows');
-    return rows ? [...rows.children].map((row) => row.textContent ?? '') : null;
-  })()`);
+  await page.evaluate(`(async () => { await ${RAF2}; })()`);
+  return await screenLines(page);
 }
 
 /**
@@ -120,7 +117,7 @@ async function main() {
   console.log(`会话 ${session.id}：${LINES} 行输出（${BASE}）`);
   const marker = `SYNC-${String(LINES).padStart(4, '0')}`;
 
-  const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+  const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: CHROMIUM_ARGS });
   const pages = [];
   try {
     const openPage = async (label) => {
@@ -142,22 +139,14 @@ async function main() {
     pages.push(await openPage('B')); // 输出进行中订阅：整段重放 + 实时续接
 
     for (const { label, page } of pages) {
-      await page.waitForFunction(
-        (m) => (document.querySelector('.xterm-rows')?.textContent ?? '').includes(m),
-        marker,
-        { timeout: 90_000 },
-      );
+      await waitForText(page, marker, 90_000);
       console.log(`客户端 ${label} 已看到最后一行 ${marker}`);
     }
     await new Promise((r) => setTimeout(r, 1500));
 
     // 第三个页面：此时输出早已结束 —— 等价于「刷新页面 / 新开网页」
     pages.push(await openPage('C(新客户端)'));
-    await pages[2].page.waitForFunction(
-      (m) => (document.querySelector('.xterm-rows')?.textContent ?? '').includes(m),
-      marker,
-      { timeout: 90_000 },
-    );
+    await waitForText(pages[2].page, marker, 90_000);
     console.log('客户端 C(新客户端) 已看到最后一行');
     await new Promise((r) => setTimeout(r, 800));
 

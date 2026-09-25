@@ -21,7 +21,8 @@ import { join } from 'node:path';
 
 import { chromium } from 'playwright-core';
 
-import { OUT_DIR, PYTHON, chromiumExecutable } from './env.mjs';
+import { CHROMIUM_ARGS, OUT_DIR, PYTHON, chromiumExecutable } from './env.mjs';
+import { screenLines, waitForText } from './screen.mjs';
 import { createSession, resetSessions, startServer, summarize } from './server.mjs';
 
 /** 由 `main` 在服务起来后赋值；其余函数都通过它访问服务。 */
@@ -60,12 +61,7 @@ function altScreen() {
   ];
 }
 
-const rowsNow = (page) =>
-  page.evaluate(() =>
-    [...(document.querySelector('.xterm-rows')?.children ?? [])].map((r) =>
-      (r.textContent ?? '').trim(),
-    ),
-  );
+const rowsNow = (page) => screenLines(page);
 const debugState = (page) => page.evaluate(() => window.__terminald.debugState());
 const storage = (page) =>
   page.evaluate(() => ({ ...window.sessionStorage }));
@@ -75,13 +71,7 @@ async function selectSession(page, name) {
   await page.locator('.session', { hasText: name }).first().click({ timeout: 20_000 });
 }
 
-async function waitForText(page, marker, timeout = 60_000) {
-  await page.waitForFunction(
-    (needle) => (document.querySelector('.xterm-rows')?.textContent ?? '').includes(needle),
-    marker,
-    { timeout },
-  );
-}
+// 屏幕文本的读取与等待统一在 `screen.mjs`：WebGL 渲染器下 DOM 里已经没有文本可取
 
 /** 在终端上滚轮滚动（负值 = 往上翻历史）。 */
 async function wheel(page, delta, times = 1) {
@@ -125,7 +115,7 @@ async function main() {
     console.log(`会话 a=${a.id} b=${b.id} c=${c.id}`);
     await sleep(1500);
 
-    browser = await chromium.launch({ executablePath: CHROME, headless: true });
+    browser = await chromium.launch({ executablePath: CHROME, headless: true, args: CHROMIUM_ARGS });
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
     const pageErrors = [];

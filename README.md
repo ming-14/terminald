@@ -10,7 +10,7 @@
 | 部分 | 状态 |
 |---|---|
 | `backend/` | 已完成。`ruff` + `ruff format` + `mypy --strict` + `pytest` 四道全绿（261 通过 + 32 个真实宿主契约测试） |
-| `frontend/` | 已完成。`tsc --strict` + 115 个 vitest + 七个真实浏览器探针（共 93 项断言）全通过 |
+| `frontend/` | 已完成。`tsc --strict` + 117 个 vitest + 八个真实浏览器探针（共 107 项断言）全通过 |
 | `docs/` | `architecture.md`、`protocol.md`、`design/frontend-draft.html`、`audit.md`（四轮审计报告：产品缺陷 A1–A13、验证层缺陷 V1–V6、交付前清理 C1–C9、测试同步纪律 D1–D7）已就位 |
 | `vendor/` | 本地 wheel 与上游源码副本已就位 |
 
