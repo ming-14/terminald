@@ -274,9 +274,16 @@ body {
 
 /* ---------- 终端 ---------- */
 
+/*
+ * 终端区容器用 --panel，里面的网格用更暗的 --term-bg：**边界靠色阶差表达**。
+ *
+ * 早先两处都是 --term-bg，加上 xterm 的 viewport 也是同一个色，三层完全重合，
+ * 120×30 那片网格铺到哪儿就看不出来了（真出现过「终端界限和背景融在一起」）。
+ * 层级由暗到亮：网格 --term-bg < 页面 --bg < 终端区 --panel < 侧栏 --panel-2。
+ */
 .term-host {
   position: relative;
-  background: var(--term-bg);
+  background: var(--panel);
   overflow: hidden;
   min-width: 0;
   min-height: 0;
@@ -285,6 +292,29 @@ body {
 /* xterm 的容器：由字号求解决定实际大小，剩余量作为居中留白 */
 .term-host .xterm {
   position: absolute;
+}
+
+/*
+ * 网格自己带终端底色，包裹层一律透明。
+ *
+ * 为什么必须 !important：xterm 是用**行内样式**给这两层刷底色的（.xterm-viewport 的 #000
+ * 来自它自带的 CSS，.xterm-scrollable-element 的底色来自渲染器按 THEME.background 写进
+ * style 属性），行内优先于类选择器 —— 不加 !important 就盖不住。
+ *
+ * 实测代价（不加的时候）：.xterm-scrollable-element 宽 1207（铺满容器）而网格只有 1080，
+ * 它把网格左右各 63px 的留白涂成了与网格同色，横向边界直接消失；纵向因为它的高度只有
+ * 网格那么高，反而看得见 —— 所以只修一半会得到「上下有边、左右没边」的怪结果。
+ *
+ * 底色挂在 .xterm-screen 上（居中时被 left/top 挪的是它，见 app.ts 的 #placeGrid），
+ * 这个色与 app.ts 的 THEME.background 描述的是同一件事，必须同色。
+ */
+.term-host .xterm-scrollable-element,
+.term-host .xterm-viewport {
+  background: transparent !important;
+}
+
+.term-host .xterm-screen {
+  background: var(--term-bg);
 }
 
 .notice {
