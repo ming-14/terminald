@@ -14,7 +14,7 @@ npm run typecheck  # tsc --noEmit，strict
 npm test           # vitest
 npm run build      # typecheck + 构建到 backend/src/terminald/web/
 npm run probe      # 真实浏览器端到端探针（自带服务器，不碰你手上的会话）
-npm run probe:all  # 全部七个探针（约 4 分钟，逐个跑完再汇总退出码）
+npm run probe:all  # 全部八个探针（约 4 分钟，逐个跑完再汇总退出码）
 ```
 
 探针驱动的是**构建产物**，所以改完前端要先 `npm run build` 再跑探针。
@@ -33,6 +33,24 @@ src/
 probe/        真实浏览器探针（真 Chromium，走完整链路）
 ```
 
+## 渲染器：WebGL + 自绘字形（`ui/app.ts`）
+
+`open()` 之后挂的是 `@xterm/addon-webgl`，不是默认的 DOM 渲染器。理由只有一个但很硬：
+**方块与盒线字符只有非 DOM 渲染器才会自绘几何、填满整个字符格**（U+2500–257F 盒线、
+U+2580–259F 方块、U+E0A0–E0BF powerline）。而我们的行高是固定 1.3 倍（见 `render/size.ts`），
+格子比字体字形高——交给字体画，竖着叠两个 `█` 必然留一条横缝。同一图案实测：自绘 0 空洞、
+字体字形 620 px 空洞（两组数字与截图见 `probe/glyphs.mjs`）。
+
+两条连带影响，改前端时要知道：
+
+- **DOM 里没有屏幕文本了。** 换渲染器会把 DomRenderer dispose 掉，而 `.xterm-rows` 正是它的元素，
+  于是「读 DOM 文本」那套取数口全部失效。屏幕文本改从 `debugState().screenLines` 读
+  （`probe/screen.mjs` 是唯一入口）；像素那一层由 `probe/glyphs.mjs` 与 smoke 的非底色像素数守。
+  两者别混着说：**「进了缓冲区」不等于「画到了屏幕上」**。
+- **拿不到 WebGL2 时会退回 DOM 渲染器**（`app.ts` 接住了 addon 的抛错并发告警，不是静默）。
+  所以探针必须带 `--enable-unsafe-swiftshader`（`probe/env.mjs` 的 `CHROMIUM_ARGS`）：无头
+  Chromium 默认拿不到 WebGL2，少了它测的就是另一条渲染路径。
+
 ## 快捷键扩展：四个浏览器级交互（`ui/shortcuts.ts`）
 
 F11 / Ctrl+C / Ctrl+V / 右键都是**浏览器与 xterm 默认行为的冲突**，不是应用逻辑：xterm 在发完
@@ -43,7 +61,7 @@ Ctrl+C 有选区也只打断不复制、F11 会往 PTY 里塞 `\x1b[23~`。
 所以两件本来就该由浏览器做的事（原生粘贴、原生复制）只是「不再被掐掉」，而不是被重写一遍。
 现状、根因与实测数字见 `docs/audit.md` A12 与 `docs/architecture.md` §11.2。
 
-`npm run probe:all` 会依次跑 `probe/` 下全部七个探针（各练什么、占用哪个端口、有哪几个
+`npm run probe:all` 会依次跑 `probe/` 下全部八个探针（各练什么、占用哪个端口、有哪几个
 环境变量见 `probe/README.md`）；单独跑某一个，例如 `node probe/shortcuts.mjs`
 （`PROBE_HEADED=1` 用可视浏览器跑同一组）。
 
@@ -82,10 +100,12 @@ Ctrl+C 有选区也只打断不复制、F11 会往 PTY 里塞 `\x1b[23~`。
 
 它用真 Chromium 走完整链路，自带一个后端：
 
-- xterm 挂载、侧栏会话名正确、历史重放渲染到屏幕
+- xterm 挂载、侧栏会话名正确、历史重放进入屏幕缓冲
+- **标记那一行真的被画在了屏幕上**（数那一行的非底色像素）：WebGL 渲染器下 DOM 里没有文本，
+  「进了缓冲区」与「画出来了」是两层，这条专门守后者
 - 网格未溢出容器、`.xterm` 铺满、网格居中留白
 - 会话切换不混屏、切回后重新订阅
-- 键盘输入 → WS → 真实 PTY → 回显到屏幕
+- 键盘输入 → WS → 真实 PTY → 回显到屏幕（回显同样读模型文本，见 `probe/screen.mjs`）
 - 刷新页面后内容仍在（无损续传）
 - 无 JS 错误、无失败请求
 

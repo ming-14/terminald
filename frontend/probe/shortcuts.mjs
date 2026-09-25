@@ -27,7 +27,8 @@ import { join } from 'node:path';
 
 import { chromium } from 'playwright-core';
 
-import { OUT_DIR, SHELL, chromiumExecutable } from './env.mjs';
+import { CHROMIUM_ARGS, OUT_DIR, SHELL, chromiumExecutable } from './env.mjs';
+import { rowIndexOf, waitForText } from './screen.mjs';
 import { createSession, resetSessions, startServer, summarize } from './server.mjs';
 
 const COMSPEC = SHELL;
@@ -154,7 +155,7 @@ async function main() {
     await createSession(BASE, 'shortcuts', [COMSPEC]);
     console.log(`会话已建立（${COMSPEC}）${HEADED ? '，浏览器可视模式' : ''}`);
 
-    browser = await chromium.launch({ executablePath: CHROME, headless: !HEADED });
+    browser = await chromium.launch({ executablePath: CHROME, headless: !HEADED, args: CHROMIUM_ARGS });
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     // 读权限是探针自己要的（回读剪贴板验证）；写权限只是**搭台**用的（往剪贴板放测试标记）。
     // 它不会让被测行为变成假绿：产品代码根本不调 `writeText`（下面有断言钉住这一点），
@@ -192,19 +193,9 @@ async function main() {
       // 让屏幕上出现一行已知文本，供选区使用
       await page.keyboard.type(`echo ${MARKER}`);
       await page.keyboard.press('Enter');
-      await page.waitForFunction(
-        (marker) => (document.querySelector('.xterm-rows')?.textContent ?? '').includes(marker),
-        MARKER,
-        { timeout: 10_000 },
-      );
-      const line = await page.evaluate(() => {
-        const rows = document.querySelectorAll('.xterm-rows > div');
-        for (let i = rows.length - 1; i >= 0; i -= 1) {
-          if ((rows[i].textContent ?? '').includes('SHORTCUT-PROBE-LINE')) return i;
-        }
-        return -1;
-      });
-      check('已知文本行已渲染（选区可定位）', line >= 0, `第 ${line} 行`);
+      await waitForText(page, MARKER, 10_000);
+      const line = await rowIndexOf(page, 'SHORTCUT-PROBE-LINE');
+      check('已知文本行已进入屏幕缓冲（选区可定位）', line >= 0, `第 ${line} 行`);
 
       // ------------------------------------------------------------------ A. F11
       let before = await frameCount(page);

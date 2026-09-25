@@ -12,10 +12,10 @@ DOM 里没有痕迹；`Pty.close()` 能在**持着 GIL** 的情况下阻塞 236 
 ```bash
 cd frontend && npm run build      # 探针驱动的是后端托管的那份产物，先重新构建
 npm run probe                     # 基础套件（smoke）
-npm run probe:all                 # 全部七个（约 4 分钟）
+npm run probe:all                 # 全部八个（约 4 分钟）
 ```
 
-`probe:all` 走 `probe/all.mjs`：**七个全部跑完再汇总**（某一个红了不会把后面几个吃掉），
+`probe:all` 走 `probe/all.mjs`：**八个全部跑完再汇总**（某一个红了不会把后面几个吃掉），
 任何一个失败都以非零退出码结束。
 
 **每个探针自带服务器**：各自起一个独立端口的 `terminald`，跑完自行收掉。所以——
@@ -24,7 +24,7 @@ npm run probe:all                 # 全部七个（约 4 分钟）
 - 想打到已有的服务上（手工排查时），设 `PROBE_BASE=http://127.0.0.1:8765`：此时不再另起进程，
   但开始前的「清空会话」会作用在那个服务上，别在手里有活儿的时候用。
 
-端口从各探针声明的默认值起（8801..8807），被占就自动往上找空闲的。
+端口从各探针声明的默认值起（8801..8808），被占就自动往上找空闲的。
 
 ```bash
 node probe/shortcuts.mjs                     # 单个探针
@@ -37,6 +37,7 @@ PROBE_OUT=/tmp/probe-shots node probe/smoke.mjs   # 换个落盘目录
 | 探针 | 端口 | 证明 |
 |---|---|---|
 | `smoke.mjs` | 8805 | 挂载、布局与字号反算、键盘往返（敲的字节到了子进程并回显）、双击重命名真的到达服务端、刷新续传、焦点序列不多吐一份、无 JS 错误/无失败请求 |
+| `glyphs.mjs` | 8808 | **读像素**：实心块内部空洞必须为 0（竖叠横排都连）、盒线线心无断点、中文画得出来且仍按双宽占格；外加一个对照组（把 `getContext('webgl2')` 打成 null）证明方块那条断言不是恒真的，并顺带验证 WebGL 不可用时确实会退回 DOM 渲染器 |
 | `multi-client.mjs` | 8806 | 多客户端逐行一致（两个在输出中订阅、一个结束后订阅）+ 滚动几何一致 |
 | `scrollback.mjs` | 8807 | scrollback 真的交付到浏览器：三客户端各自滚到最早一行，顶部逐行一致 |
 | `remember.mjs` | 8802 | 刷新后仍在原会话、视口回到同一行且那一屏逐行一致、底部不被强行拽回、切会话不混屏、新建会话清屏且可交互 |
@@ -51,16 +52,30 @@ PROBE_OUT=/tmp/probe-shots node probe/smoke.mjs   # 换个落盘目录
 ## 共用件
 
 - `all.mjs`：依次跑完全部探针并汇总退出码（`npm run probe:all` 的落点）。
-- `env.mjs`：仓库布局（由文件位置推导）、解释器与 Chromium 的定位、落盘目录、shell 与
-  `shellCommand()`。**探针里不允许再出现写死的绝对路径或用户目录**。
+- `env.mjs`：仓库布局（由文件位置推导）、解释器与 Chromium 的定位、`CHROMIUM_ARGS`
+  （无头 Chromium 默认没有 GPU，不给它 `--enable-unsafe-swiftshader` 就拿不到 WebGL2 上下文，
+  页面会**静默退回 DOM 渲染器**——那时 `glyphs.mjs` 测的就不是它想测的那条渲染路径）、
+  落盘目录、shell 与 `shellCommand()`。**探针里不允许再出现写死的绝对路径或用户目录**。
 - `server.mjs`：自带服务器（选端口、拉起、等健康检查、失败时带出服务端 stderr）与
   会话管理（`listSessions` / `resetSessions` / `createSession`）、统一的收尾 `summarize`。
+- `screen.mjs`：**探针怎么看屏幕**——文本统一从 `debugState().screenLines` 取（`screenLines` /
+  `screenText` / `waitForText` / `rowIndexOf`），像素统一用 `countNonBackground` 数（截图 → 在
+  页面内解码 → 只把数字带回来）。原先六个探针各写一遍 `document.querySelector('.xterm-rows')`，
+  那个口子在换渲染器之后已经不存在了（见下一条）。
 - `README.md`（本文件）：探针的约定。
 
 ## 约定
 
+- **屏幕文本只能从 `screen.mjs` 读，别去查 DOM。** 前端用的是 WebGL 渲染器（`src/ui/app.ts`），
+  它会把 DomRenderer 一起 dispose 掉，而 `document.querySelector('.xterm-rows')` 正是 DomRenderer
+  的元素——换完之后 DOM 里**没有**任何屏幕文本。`glyphs.mjs` 有一条断言专门钉住这件事。
+- **「文本进了缓冲区」与「文本被画到屏幕上」是两层，说断言时别混。** `screen.mjs` 的文本读的是
+  模型，它证明的是字节被解析了，**不证明**画面被画出来了；像素那一层由 `glyphs.mjs`（逐格数空洞）
+  与 `smoke.mjs`（标记所在行的非底色像素数）守。少了后一层，整轮验证就只剩"模型对了"。
 - 探针里的断言必须是**能红的**。恒真的断言（例如用 `outerHeight >= screen.height` 判全屏）
   比没有断言更糟，它们会让整轮结果变成假绿。发现一条就改成真判据，或者只打印不判定。
+  同理，**对照组的断言要能证明主组不是恒真的**：`glyphs.mjs` 会把 `getContext('webgl2')` 打成
+  null 跑一遍，数出字体字形留下的缝（620 px）——那一条红了，主组的「0 空洞」才有意义。
 - 量之前先把探针自己造成的噪声排除掉：探针搭台时的写入、过滤后/未过滤的帧数混用，
   都曾经把「我测错了东西」伪装成缺陷（记在 `docs/audit.md` 里）。
 - 失败必须以**非零退出码**结束（用 `summarize(results)`），否则 CI 与 `probe:all` 会把

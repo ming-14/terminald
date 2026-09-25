@@ -15,7 +15,8 @@ import { join } from 'node:path';
 
 import { chromium } from 'playwright-core';
 
-import { OUT_DIR, PYTHON, SHELL, chromiumExecutable, shellCommand } from './env.mjs';
+import { CHROMIUM_ARGS, OUT_DIR, PYTHON, SHELL, chromiumExecutable, shellCommand } from './env.mjs';
+import { countNonBackground, rowIndexOf, screenText, waitForText } from './screen.mjs';
 import { createSession, listSessions, resetSessions, startServer, summarize } from './server.mjs';
 
 const CHROME = chromiumExecutable();
@@ -43,7 +44,7 @@ async function main() {
   const interactive = await createSession(BASE, 'probe-interactive', [SHELL]);
   console.log(`会话 A=${a.id}（echo 后退出） B=${interactive.id}（交互 shell）`);
 
-  const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+  const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: CHROMIUM_ARGS });
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 
   const pageErrors = [];
@@ -92,14 +93,38 @@ async function main() {
     check('侧栏列出会话', names.length >= 2, JSON.stringify(names));
 
     // ---- 3. 自动订阅首个会话，且历史被重放渲染出来
-    const terminalText = () =>
-      page.evaluate(() => document.querySelector('.xterm-rows')?.textContent ?? '');
-    await page.waitForFunction(
-      () => (document.querySelector('.xterm-rows')?.textContent ?? '').includes('PROBE_REPLAY_OK'),
-      null,
-      { timeout: 20_000 },
-    );
-    check('历史重放渲染到屏幕', true, (await terminalText()).slice(0, 60).replace(/\s+/g, ' '));
+    const terminalText = () => screenText(page);
+    await waitForText(page, 'PROBE_REPLAY_OK', 20_000);
+    check('历史重放进入屏幕缓冲', true, (await terminalText()).slice(0, 60).replace(/\s+/g, ' '));
+
+    // 像素兜底：上面那条读的是**模型里的文本**（WebGL 渲染器下 DOM 里没有文本可取，见
+    // `probe/screen.mjs` 顶部说明），它不证明文字被画到了屏幕上。这里补一条只看颜色的断言：
+    // 标记所在那一行的像素不能全是终端底色。只截这一行，把闪烁的光标排除在外。
+    const markerRow = await rowIndexOf(page, 'PROBE_REPLAY_OK');
+    const screenBox = await page.locator('.xterm-screen').boundingBox();
+    const cellHeight = await page.evaluate(() => {
+      const state = window.__terminald.debugState();
+      return document.querySelector('.xterm-screen').getBoundingClientRect().height / state.rows;
+    });
+    if (markerRow < 0 || screenBox === null) {
+      check('标记所在行可定位', false, `行号 ${markerRow}`);
+    } else {
+      const painted = await countNonBackground(page, {
+        clip: {
+          x: screenBox.x,
+          y: screenBox.y + markerRow * cellHeight,
+          width: screenBox.width,
+          height: cellHeight,
+        },
+      });
+      check(
+        '标记那一行真的被画在了屏幕上（不是一片底色）',
+        // 门槛：15 个字符在 14px 字号下大约占 400–600 个非底色像素（实测 422），而一整行
+        // 空白只有光标那几十像素。取 300 是为了「明显有字」而不是「量到底有多少墨」。
+        painted.nonBackground > 300,
+        `${painted.width}×${painted.height} 非底色像素 ${painted.nonBackground}`,
+      );
+    }
 
     // ---- 4. 顶栏状态是否反映了真实尺寸
     const chips = await page.$$eval('.chips .chip', (nodes) =>
@@ -214,20 +239,12 @@ async function main() {
     await page.click('.xterm-screen');
     await page.keyboard.type('echo TYPED_FROM_BROWSER');
     await page.keyboard.press('Enter');
-    await page.waitForFunction(
-      () => (document.querySelector('.xterm-rows')?.textContent ?? '').includes('TYPED_FROM_BROWSER'),
-      null,
-      { timeout: 25_000 },
-    );
+    await waitForText(page, 'TYPED_FROM_BROWSER', 25_000);
     check('键盘输入经 PTY 往返并回显', true);
 
     // ---- 8. 切回第一个会话：应重新订阅并再次拿到历史（不混屏）
     await page.locator('.session').nth(0).click();
-    await page.waitForFunction(
-      () => (document.querySelector('.xterm-rows')?.textContent ?? '').includes('PROBE_REPLAY_OK'),
-      null,
-      { timeout: 15_000 },
-    );
+    await waitForText(page, 'PROBE_REPLAY_OK', 15_000);
     const afterSwitch = await terminalText();
     check('切回后重新订阅并重放', true);
     check(
@@ -238,11 +255,7 @@ async function main() {
 
     // ---- 9. 刷新页面：应无损续传（scrollback 一起回来）
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(
-      () => (document.querySelector('.xterm-rows')?.textContent ?? '').includes('PROBE_REPLAY_OK'),
-      null,
-      { timeout: 20_000 },
-    );
+    await waitForText(page, 'PROBE_REPLAY_OK', 20_000);
     const chipsAfterReload = await page.$$eval('.chips .chip', (nodes) =>
       nodes.map((n) => n.textContent ?? ''),
     );

@@ -21,7 +21,8 @@ import { join } from 'node:path';
 
 import { chromium } from 'playwright-core';
 
-import { OUT_DIR, SHELL, PYTHON, chromiumExecutable } from './env.mjs';
+import { CHROMIUM_ARGS, OUT_DIR, SHELL, PYTHON, chromiumExecutable } from './env.mjs';
+import { waitForText } from './screen.mjs';
 import { createSession, resetSessions, startServer, summarize } from './server.mjs';
 
 const COMSPEC = SHELL;
@@ -131,7 +132,7 @@ async function main() {
     const other = await createSession(BASE, 'other', [COMSPEC]);
     console.log(`会话 held=${held.id} other=${other.id}`);
 
-    browser = await chromium.launch({ executablePath: CHROME, headless: true });
+    browser = await chromium.launch({ executablePath: CHROME, headless: true, args: CHROMIUM_ARGS });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const pageErrors = [];
     page.on('pageerror', (error) => pageErrors.push(String(error)));
@@ -254,11 +255,7 @@ async function main() {
 
     await page.locator('.xterm-screen').click();
     await page.keyboard.insertText('echo PROBE_HOLD_OK\r');
-    await page.waitForFunction(
-      () => (document.querySelector('.xterm-rows')?.textContent ?? '').includes('PROBE_HOLD_OK'),
-      null,
-      { timeout: 20_000 },
-    );
+    await waitForText(page, 'PROBE_HOLD_OK', 20_000);
     check('被暂缓期间新会话的键盘输入仍然有效', true);
 
     const finalState = await debugState();

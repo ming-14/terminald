@@ -10,7 +10,8 @@
 
 import { chromium } from 'playwright-core';
 
-import { PYTHON, chromiumExecutable } from './env.mjs';
+import { CHROMIUM_ARGS, PYTHON, chromiumExecutable } from './env.mjs';
+import { screenLines, waitForText } from './screen.mjs';
 import { createSession, resetSessions, startServer, summarize } from './server.mjs';
 
 const CHROME = chromiumExecutable();
@@ -22,10 +23,7 @@ function check(name, ok, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
-const rowsNow = (page) =>
-  page.evaluate(() =>
-    [...(document.querySelector('.xterm-rows')?.children ?? [])].map((r) => (r.textContent ?? '').trim()),
-  );
+const rowsNow = (page) => screenLines(page);
 
 async function open(browser, base, label) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
@@ -33,11 +31,7 @@ async function open(browser, base, label) {
   await page.goto(base, { waitUntil: 'domcontentloaded' });
   await page.waitForSelector('.xterm-screen', { timeout: 20_000 });
   await page.locator('.session', { hasText: 'probe-scrollback' }).first().click({ timeout: 20_000 });
-  await page.waitForFunction(
-    (m) => (document.querySelector('.xterm-rows')?.textContent ?? '').includes(m),
-    `ROW-${String(LINES).padStart(4, '0')}`,
-    { timeout: 60_000 },
-  );
+  await waitForText(page, `ROW-${String(LINES).padStart(4, '0')}`, 60_000);
   console.log(`页面 ${label} 已看到最后一行`);
   return { label, page };
 }
@@ -73,7 +67,7 @@ async function main() {
     const code = `import sys;w=sys.stdout.write;[w('ROW-%04d-xxxxxxxxxxxxxxxxxxxx\\r\\n' % i) for i in range(1,${LINES + 1})]`;
     await createSession(server.base, 'probe-scrollback', [PYTHON, '-c', code]);
 
-    browser = await chromium.launch({ executablePath: CHROME, headless: true });
+    browser = await chromium.launch({ executablePath: CHROME, headless: true, args: CHROMIUM_ARGS });
     const entries = [];
     entries.push(await open(browser, server.base, 'A'));
     entries.push(await open(browser, server.base, 'B'));
