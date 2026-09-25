@@ -36,6 +36,11 @@ api ──→ service ──→ runtime ──→ core ──→ protocol
 分界的实际收益：offset、裁剪、重同步这些最容易写错的东西全在 `core`，可以脱离真实 PTY
 与网络完整单测。`runtime` 与 `core` 之间只有 `ports.py` 里那几个 Protocol。
 
+`runtime` 还额外负责**把不安装的长期依赖接进来**：`runtime/vendor.py` 从包自身的位置向上
+找到仓库里的 `vendor/` 并接进 `sys.path`，因此 pywezterm 既不走 pip，也不需要调用者配
+`PYTHONPATH`。放在这一层是因为它是唯一允许触碰该扩展的层，且必须在任何 `import pywezterm`
+之前完成——`runtime/__init__.py` 本身不导入扩展，真正的导入发生在 `pywezterm_host` 里。
+
 ## 3. 内容真源：输出字节日志
 
 **会话内容的真源是它产出的原始字节流，不是终端模型的渲染结果。**

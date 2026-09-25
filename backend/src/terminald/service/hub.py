@@ -260,7 +260,9 @@ class Hub:
                 case SessionRename():
                     self._on_session_rename(client, message)
         except TerminaldError as exc:
-            self._fail(client, type(exc).__name__, str(exc))
+            # 给客户端的是 `code` 与**面向使用者**的文案；技术细节（`str(exc)`）只进日志，
+            # 那里才是偏移数字、会话 id 这类东西该待的地方。
+            self._fail(client, exc.code, exc.user_message, detail=str(exc))
 
     def handle_input(self, client_id: str, data: bytes) -> InputVerdict:
         """处理 INPUT 二进制帧（客户端已编码好的键盘/粘贴字节）。
@@ -608,8 +610,13 @@ class Hub:
         client.outbox.push_text(dump_bytes(message))
         client.wakeup.set()
 
-    def _fail(self, client: Client, code: str, message: str) -> None:
-        _log.debug("向客户端 %s 报错 %s: %s", client.id, code, message)
+    def _fail(self, client: Client, code: str, message: str, *, detail: str = "") -> None:
+        """下发一次失败。
+
+        `message` 会被前端原样显示给使用者，`detail`（技术细节）只进日志——两者曾经是
+        同一个字符串，结果就是部署指引被弹到了浏览器上。
+        """
+        _log.warning("向客户端 %s 报错 %s: %s", client.id, code, detail or message)
         self._send(client, Failure(code=code, message=message))
 
     # ============================================================ 内部：元数据与焦点

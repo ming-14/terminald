@@ -23,9 +23,14 @@ api ──→ service ──→ runtime ──→ core ──→ protocol
 
 ## 环境装配
 
-pywezterm **不在 PyPI 上**，也**不安装**：它是仓库里的长期依赖，包目录在 `../vendor/pywezterm/`，
-靠 `PYTHONPATH` 指到 `vendor/` 让它可导入（测试由 `pyproject.toml` 的 `pythonpath` 自动带上，
-见「跑测试」）。
+pywezterm **不在 PyPI 上**，也**不安装**：它是仓库里的长期依赖，包目录在 `../vendor/pywezterm/`。
+
+**不需要配 `PYTHONPATH`**：`runtime/vendor.py` 会从包自身的位置向上找到仓库里的 `vendor/`
+并接进 `sys.path`，因此用哪个解释器（venv 或系统 Python）、从哪个目录起都一样。
+（pytest 另由 `pyproject.toml` 的 `pythonpath = ["src", "../vendor"]` 带上，见「跑测试」。）
+
+依赖真的缺失时，服务**拒绝启动**并退出码 2，日志里给出怎么补依赖；不会起来一个
+照常监听、却建不出会话的进程。
 
 ```bash
 cd backend
@@ -39,8 +44,8 @@ python -m venv .venv
 ```
 
 > `pyproject.toml` 的 `dependencies` 里刻意**没有** pywezterm——写进去会让 `pip install -e .`
-> 因为找不到 PyPI 包而失败。它的包体在 `../vendor/pywezterm/`，运行与测试时由 `PYTHONPATH`
-> 提供（测试另有 `pyproject.toml` 的 `pythonpath = ["src", "../vendor"]` 兜住）。
+> 因为找不到 PyPI 包而失败。它的包体在 `../vendor/pywezterm/`，由 `runtime/vendor.py`
+> 在运行时接进 `sys.path`（测试另有 `pythonpath = ["src", "../vendor"]` 兜住）。
 
 ### 前端构建产物
 
@@ -104,9 +109,9 @@ python -m venv .venv
 ## 运行
 
 ```bash
-# 真实宿主（默认）。PYTHONPATH 指到仓库的 vendor/：pywezterm 从那里导入，不安装
-PYTHONPATH=../vendor ./.venv/Scripts/python.exe -m terminald --port 8765
-#   PowerShell：$env:PYTHONPATH='../vendor'; ./.venv/Scripts/python.exe -m terminald --port 8765
+# 真实宿主（默认）。pywezterm 由程序自己从 vendor/ 找到，不需要 PYTHONPATH
+./.venv/Scripts/python.exe -m terminald --port 8765
+#   系统 Python 一样可以：python -m terminald --port 8765
 
 # 只接受回环地址：当前版本没有认证，绑到其它地址会被拒绝启动
 ```

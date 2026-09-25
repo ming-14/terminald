@@ -52,8 +52,7 @@ PROBE_OUT=/tmp/probe-shots node probe/smoke.mjs   # 换个落盘目录
 ## 共用件
 
 - `all.mjs`：依次跑完全部探针并汇总退出码（`npm run probe:all` 的落点）。
-- `env.mjs`：仓库布局（由文件位置推导）、解释器与 Chromium 的定位、`VENDOR_DIR`（不安装的长期依赖
-  `vendor/pywezterm/` 所在目录，探针起服务时把它拼进 `PYTHONPATH`）、`CHROMIUM_ARGS`
+- `env.mjs`：仓库布局（由文件位置推导）、解释器与 Chromium 的定位、`CHROMIUM_ARGS`
   （无头 Chromium 默认没有 GPU，不给它 `--enable-unsafe-swiftshader` 就拿不到 WebGL2 上下文，
   页面会**静默退回 DOM 渲染器**——那时 `glyphs.mjs` 测的就不是它想测的那条渲染路径）、
   落盘目录、shell 与 `shellCommand()`。**探针里不允许再出现写死的绝对路径或用户目录**。

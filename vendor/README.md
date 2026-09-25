@@ -13,9 +13,12 @@ OpenConsole.exe    ConPTY 侧载宿主（与 conpty.dll 必须同目录）
 __init__.py
 ```
 
-- **不 `pip install`**：`backend/.venv` 里没有它。运行与测试时把本目录的上一层（`vendor/`）
-  加进 `PYTHONPATH` 即可 —— 手动起服务见 `backend/README.md` 的「运行」一节，pytest 由
-  `backend/pyproject.toml` 的 `pythonpath` 自动带上，浏览器探针由 `probe/server.mjs` 注入。
+- **不 `pip install`**：`backend/.venv` 里没有它，也**不需要配 `PYTHONPATH`**——
+  `backend/src/terminald/runtime/vendor.py` 会从包自身的位置向上找到本目录并接进
+  `sys.path`，所以用 venv 还是系统 Python、从哪个目录起都一样。
+  测试由 `backend/pyproject.toml` 的 `pythonpath` 带上，浏览器探针由 `probe/server.mjs` 注入。
+- 依赖真的找不到时，服务**拒绝启动**（退出码 2）并在日志里给出怎么补依赖——不会起来一个
+  照常监听、却建不出会话的进程。
 - 目录名必须是 `pywezterm`（就是导入名），且 **`conpty.dll` / `OpenConsole.exe` 必须与
   `pywezterm.pyd` 同目录**：加载器按 `<包目录>/conpty.dll` 找侧载 DLL，找不到就静默回落
   系统 conhost，那样「wezterm 自带的 OpenConsole 宿主」就等于没启用。

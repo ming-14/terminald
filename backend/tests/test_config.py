@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from terminald.__main__ import build_parser, settings_from_args
+from terminald.__main__ import build_parser, main, settings_from_args
 from terminald.config import Settings
 
 
@@ -79,3 +79,37 @@ def test_cli_does_not_clobber_env_provided_values(monkeypatch: pytest.MonkeyPatc
 def test_parser_exposes_host_impl_choices() -> None:
     actions = {action.dest: action for action in build_parser()._actions}
     assert set(actions["host_impl"].choices or ()) == {"pywezterm", "fake"}  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------- 启动自检
+
+#: 依赖缺失属于「没有任何后续信号」的错误：不拦住的话服务会照常起来、照常监听，
+#: 直到有人新建会话才失败，而那时它只会变成浏览器上一条读不懂的提示。
+
+
+def test_startup_refuses_when_host_dependency_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "terminald.runtime.pywezterm_host.load_error", lambda: "缺少 pywezterm（测试注入）"
+    )
+    # 返回 2 而不是起服务；这条一旦退化成「照常启动」，下面这行就会挂住或返回 0
+    assert main(["--host-impl", "pywezterm"]) == 2
+
+
+def test_startup_self_check_is_skipped_for_fake_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fake` 是测试替身，它不依赖原生扩展，不该被启动自检拦住。"""
+    consulted: list[str] = []
+
+    def _boom() -> str:
+        consulted.append("called")
+        return "不应该被调用"
+
+    monkeypatch.setattr("terminald.runtime.pywezterm_host.load_error", _boom)
+    # 真正起服务会绑端口；只关心自检有没有拦它，所以把 run 换成空操作
+    monkeypatch.setattr("uvicorn.Server.run", lambda self: None)
+
+    assert main(["--host-impl", "fake"]) == 0
+    assert consulted == []

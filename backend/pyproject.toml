@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 
 # 注意：pywezterm 不在 PyPI 上、也**不安装**，它是本仓库的长期依赖 vendor/pywezterm/，
 # 因此**不能**写进 dependencies（否则 pip install -e . 必然失败）。
-# 靠 PYTHONPATH 指到 vendor/ 才能导入，见 backend/README.md 与下面的 pythonpath。
+# 运行时由 src/terminald/runtime/vendor.py 自己定位并接进 sys.path，不需要 PYTHONPATH。
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn[standard]>=0.30,<1",

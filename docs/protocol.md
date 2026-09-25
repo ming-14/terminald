@@ -82,7 +82,7 @@ offset 是整个同步机制的坐标：客户端据此上报已确认位置，�
 | `sessions` | `items` | 会话列表 |
 | `behind` | `session`、`offset`、`reason` | 该客户端已落后：增量停止发送，请发起 `resync` |
 | `input_hold` | `session`、`paused` | 输入方向流控：`true` = 本端排队不要再发，`false` = 已排水，原序补发（见 §3「输入流控」） |
-| `error` | `code`、`message` | 错误（`code` 通常是领域错误类名） |
+| `error` | `code`、`message` | 错误（`code` 是稳定标识，`message` 可直接显示给使用者） |
 
 `attached` 一次交齐三个终端侧属性（`cols` / `rows` / `scrollback`）：它们决定客户端如何渲染与
 保留历史，客户端**无权修改**，也不该自己猜。`scrollback` 尤其不能不传——否则前端只能写死一个数
@@ -270,7 +270,7 @@ PYTHONPATH=src ./.venv/Scripts/python.exe -c "import json;from terminald.protoco
 | 情况 | 服务端行为 |
 |---|---|
 | 控制消息 JSON 非法 / 字段不合法 | 回 `error{code:"bad_message"}`，连接保留 |
-| 领域错误（如 `SessionNotFound`） | 回 `error{code:<类名>}`，连接保留 |
+| 领域错误（如会话不存在） | 回 `error{code:"session_not_found"}`，连接保留 |
 | 控制消息超过 1 MiB | 回 `error{code:"too_large"}` 并以 `1009` 关闭 |
 | 二进制帧解析失败 | 以 `1002` 关闭（字节流已错位） |
 | 已暂缓仍越过输入硬上限 | 回 `error{code:"input_overflow"}` 并以 `1009` 关闭（见 §3「输入流控」） |
@@ -278,5 +278,19 @@ PYTHONPATH=src ./.venv/Scripts/python.exe -c "import json;from terminald.protoco
 | `Host`/`Origin` 非回环 | 不 accept，HTTP 403 |
 
 关闭码：`1000` 正常、`1002` 协议错误、`1008` 策略拒绝（来源/握手超时）、`1009` 消息过大。
+
+### `code` 与 `message` 的分工
+
+两者受众不同，**不能拿同一份字符串**：
+
+- `code` 是**稳定标识**（snake_case，如 `session_not_found` / `host_unavailable`），给客户端
+  分支与排查用。**它不是领域错误类名的镜像**——类名会随重构改名，而 `code` 是协议的一部分，
+  改名即破坏兼容性。已知取值由 `tests/test_error_messages.py` 写死对照守着。
+- `message` 是**面向使用者**的一句话，前端会原样显示。它不得包含路径、环境变量名、偏移数字、
+  异常类名或框架内部标识——使用者既看不到服务端日志也改不了环境，那些东西只进日志与
+  REST 的 detail。这条由同一份测试用一组禁用模式守着。
+
+曾经两者都是 `type(exc).__name__` 与 `str(exc)`，结果是部署指引被弹到浏览器上、
+而无自定义 `__init__` 的错误让用户看到空白提示。
 
 连接结束前服务端会**显式**发出关闭帧，不依赖 ASGI 服务器在应用返回后收尾。

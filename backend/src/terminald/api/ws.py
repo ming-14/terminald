@@ -28,7 +28,7 @@ from uuid import uuid4
 from fastapi import APIRouter, WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
-from ..core.errors import ProtocolViolation, TerminaldError
+from ..core.errors import ProtocolViolation
 from ..logs import get_logger
 from ..protocol import PROTOCOL_VERSION, frames
 from ..protocol.messages import (
@@ -50,8 +50,13 @@ router = APIRouter()
 HELLO_TIMEOUT = 10.0
 #: 控制消息上限：控制消息是固定结构的小 JSON，1 MiB 已是两个数量级的余量
 MAX_CONTROL_BYTES = 1 << 20
-#: 输入积压越限时给人的说明（关闭帧的 reason 也会带上一份）
+#: 输入积压越限时给人的说明（关闭帧的 reason 也会带上一份）。
+#: 关闭帧的 reason 走的是 WebSocket 协议，收得到它的是对端程序与抓包的人，
+#: 不是终端使用者，所以这里保留技术措辞。
 INPUT_OVERFLOW_REASON = "输入积压超出上限：已暂缓仍继续发送"
+#: 同一个情况**弹给使用者**的文案（`Failure.message`）。连接随即断开，他能做的
+#: 只有重连，因此就这么说。
+INPUT_OVERFLOW_MESSAGE = "输入太多，服务端已断开连接，请重新连接。"
 #: 自定义关闭码
 WS_NORMAL = 1000
 WS_REJECTED = 1008
@@ -59,6 +64,14 @@ WS_PROTOCOL_ERROR = 1002
 WS_TOO_LARGE = 1009
 #: 握手不合法的错误码（首条不是 hello / JSON 非法 / 字段不合法）
 BAD_HELLO_CODE = "bad_hello"
+
+#: 下面几条 `Failure.message` 都面向**使用者**，因此只写「发生了什么」——
+#: 一句话，不带处置说明。原因、字段、该怎么修一律进服务端日志，不挂在报错句子后面。
+#: 唯一例外是可以当场照做的动作（例如「刷新页面后重试」）。
+BAD_HELLO_MESSAGE = "连接被拒绝：握手不合法。"
+PROTOCOL_MISMATCH_MESSAGE = "页面与服务端版本不一致，请刷新页面后重试。"
+BAD_MESSAGE_MESSAGE = "这个请求无法识别，已被忽略。"
+TOO_LARGE_MESSAGE = "这个请求太大，已被忽略。"
 
 
 @router.websocket("/ws")
@@ -89,17 +102,20 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         # `error{code:bad_hello}` + 明确关闭码。不接住的话异常会逃出端点，客户端只看到
         # 一个 1006 硬断（实测：什么都没收到），服务端则每次留一条 ASGI traceback（A3）。
         _log.warning("拒绝 WS 握手: %s", exc)
-        await _send_control(websocket, Failure(code=BAD_HELLO_CODE, message=str(exc)))
+        await _send_control(websocket, Failure(code=BAD_HELLO_CODE, message=BAD_HELLO_MESSAGE))
         await _close(websocket, WS_PROTOCOL_ERROR, "握手不合法")
         return
 
     if hello.protocol != PROTOCOL_VERSION:
+        _log.warning(
+            "拒绝协议版本不符的客户端 %s：期望 %s，收到 %s",
+            client_id,
+            PROTOCOL_VERSION,
+            hello.protocol,
+        )
         await _send_control(
             websocket,
-            Failure(
-                code="protocol_mismatch",
-                message=f"期望协议版本 {PROTOCOL_VERSION}，收到 {hello.protocol}",
-            ),
+            Failure(code="protocol_mismatch", message=PROTOCOL_MISMATCH_MESSAGE),
         )
         await _close(websocket, WS_PROTOCOL_ERROR, "协议版本不符")
         return
@@ -187,7 +203,7 @@ async def _receive_loop(hub: Hub, websocket: WebSocket, client_id: str) -> None:
         text = message.get("text")
         if text is not None:
             if len(text) > MAX_CONTROL_BYTES:
-                await _send_control(websocket, Failure(code="too_large", message="控制消息过大"))
+                await _send_control(websocket, Failure(code="too_large", message=TOO_LARGE_MESSAGE))
                 await _close(websocket, WS_TOO_LARGE, "控制消息过大")
                 return
             await _dispatch_control(hub, websocket, client_id, text)
@@ -206,7 +222,7 @@ async def _receive_loop(hub: Hub, websocket: WebSocket, client_id: str) -> None:
             # 这里只断开、不丢我们已收下的字节（它们仍在写队列里，会被写完）。
             await _send_control(
                 websocket,
-                Failure(code="input_overflow", message=INPUT_OVERFLOW_REASON),
+                Failure(code="input_overflow", message=INPUT_OVERFLOW_MESSAGE),
             )
             await _close(websocket, WS_TOO_LARGE, INPUT_OVERFLOW_REASON)
             return
@@ -217,12 +233,12 @@ async def _dispatch_control(hub: Hub, websocket: WebSocket, client_id: str, text
         parsed = parse_client_message(text)
     except MessageError as exc:
         _log.warning("客户端 %s 发来非法控制消息: %s", client_id, exc)
-        await _send_control(websocket, Failure(code="bad_message", message=str(exc)))
+        await _send_control(websocket, Failure(code="bad_message", message=BAD_MESSAGE_MESSAGE))
         return
-    try:
-        await hub.handle_message(client_id, parsed)
-    except TerminaldError as exc:
-        await _send_control(websocket, Failure(code=type(exc).__name__, message=str(exc)))
+    # 不必在这里接 `TerminaldError`：`hub.handle_message` 内部已经把它换成一次
+    # `Failure`（技术细节只进日志，见 core/errors.py）。再接一层不仅不可达，
+    # 一旦哪天 hub 那层被去掉，这里还会**重复下发**同一条错误。
+    await hub.handle_message(client_id, parsed)
 
 
 class _InputOutcome(StrEnum):
