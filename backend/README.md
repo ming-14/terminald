@@ -123,7 +123,7 @@ python -m venv .venv
 
 | 配置 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
-| `cols` / `rows` | `TERMINALD_COLS` / `TERMINALD_ROWS` | 120 / 30 | 终端尺寸由**终端侧**决定，客户端不参与 |
+| `cols` / `rows` | `TERMINALD_COLS` / `TERMINALD_ROWS` | 120 / 30 | **会话创建时**的尺寸；运行期由用户经前端的尺寸 chip 变更（`session.resize`）。浏览器可视面积从不参与 |
 | `scrollback` | `TERMINALD_SCROLLBACK` | 10000 | 终端模型保留的回溯行数上限 |
 | `shell` | `TERMINALD_SHELL` | 平台默认 | 支持带空格的整串，如 `pwsh.exe -NoLogo` |
 | `journal_budget_bytes` | `TERMINALD_JOURNAL_BUDGET_BYTES` | 8 MiB | 输出字节日志内存预算，超预算从头裁剪 |
