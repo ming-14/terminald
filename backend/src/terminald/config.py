@@ -4,7 +4,9 @@
 
 设计约束（来自需求对齐）：
 - **终端尺寸由终端侧决定**：`cols` / `rows` 是终端自身属性，浏览器可视面积永远
-  不参与。这里给出的是会话创建时的固定值，前端只按它反向计算字号。
+  不参与。这里给出的是**会话创建时**的初值；运行期可以由用户经前端显式变更
+  （`session.resize`，见 `docs/architecture.md` §4），但那个入口收的也是"网格尺寸"，
+  同样与窗口像素无关。
 - 仅监听回环地址：当前不做认证，暴露到回环之外等于把 shell 交给任何能访问该端口的人。
 """
 
@@ -17,6 +19,8 @@ from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from .protocol.messages import SESSION_COLS_MIN, SESSION_ROWS_MIN, SESSION_SIZE_MAX
 
 
 def _default_shell() -> list[str]:
@@ -41,8 +45,10 @@ class Settings(BaseSettings):
     port: int = Field(default=8765, ge=1, le=65535)
 
     # ---- 终端 -------------------------------------------------------------
-    cols: int = Field(default=120, ge=1, le=1000)
-    rows: int = Field(default=30, ge=1, le=1000)
+    # 边界来自协议层（`SESSION_*`）：创建初值与运行期变更（`session.resize`）必须
+    # 用**同一组**上下界，否则会出现「配置允许 1 列、变更接口拒绝 1 列」这类分歧。
+    cols: int = Field(default=120, ge=SESSION_COLS_MIN, le=SESSION_SIZE_MAX)
+    rows: int = Field(default=30, ge=SESSION_ROWS_MIN, le=SESSION_SIZE_MAX)
     scrollback: int = Field(default=10_000, ge=0)
     shell: list[str] = Field(default_factory=_default_shell)
     cwd: str | None = None

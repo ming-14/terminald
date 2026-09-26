@@ -175,6 +175,25 @@ class PyweztermHost:
         self._term.focus_changed(focused)
         return bytes(self._term.drain_written())
 
+    def resize(self, cols: int, rows: int) -> None:
+        """改 PTY 与模型的尺寸（事件循环调用，与 `ingest` 同一组）。
+
+        顺序与绑定层里 mux 的参考实现一致：先 `Pty.resize`（底层
+        `ResizePseudoConsole`），再 `Terminal.resize`（rewrap）。
+
+        实测两者的代价（`docs/resize-plan.md` §2.1）：`Pty.resize` 0.02–0.16 ms 且**不
+        持有 GIL**；`Terminal.resize` 在 10k 行 scrollback 下约 9 ms 且放掉 GIL。
+        所以放在事件循环上不会冻结别人（这与 `Pty.write` / `Pty.close` 的性质不同，
+        那两个是必须在专门线程里做的）。
+
+        **宿主随后会自己吐一段整屏重绘**（隐藏光标 → 重建可见区 → 补空行 → 显示光标，
+        实测 150–250 字节，空会话也有）。它照原样进入输出流：那是 wezterm 在 Windows 上
+        同样经历的事，过滤它反而会让我们的模型与 wezterm 收到不同的字节
+        （理由见 `docs/resize-plan.md` §5 决策 3）。
+        """
+        self._pty.resize(cols, rows)
+        self._term.resize(cols, rows)
+
     # ------------------------------------------------------------ 写线程
 
     def write(self, data: bytes) -> None:

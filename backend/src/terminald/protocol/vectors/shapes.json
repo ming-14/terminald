@@ -36,6 +36,11 @@
     "session": "str",
     "title": "str|null"
   },
+  "resized": {
+    "cols": "int",
+    "rows": "int",
+    "session": "str"
+  },
   "session_info": {
     "cols": "int",
     "created_at": "str",

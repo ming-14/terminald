@@ -4,15 +4,21 @@
 用 pydantic 严格校验（`extra="forbid"`），因此任何字段拼写错误都会在边界立刻暴露，
 而不是变成线上一个静默失效的功能。
 
-有意**不做**的三类消息，理由记录在此以免后来者困惑：
+有意**不做**的两类消息，理由记录在此以免后来者困惑：
 
-- **无 resize（两个方向都没有）**：`cols`/`rows` 是终端自身属性，由终端侧在会话创建时
-  决定（见 config.py 与 docs/architecture.md）。当前没有任何“终端侧改尺寸”的代码路径，
-  所以也没有对应的下行消息——真要加时才加，不留占位面。
 - **无 Mouse 消息**：鼠标编码由 xterm.js 依据应用开启的追踪模式完成，结果与键盘
   一样走 INPUT 二进制帧；应用未接管鼠标时由前端本地做选择/链接，服务端无需知情。
 - **无 Paste 消息**：bracketed paste 的包裹由知道该模式的一方（xterm.js）完成，
   同样落到 INPUT 帧。
+
+尺寸变更**是**协议的一部分（`session.resize` / `resized`）：`cols`/`rows` 仍是终端侧
+属性、仍由服务端持有，但可以由用户经前端显式变更（见 `docs/architecture.md` §4）。
+它不做成「客户端按自己的窗口算」——那样浏览器可视面积就会参与进来，多客户端也会有
+尺寸分歧。
+
+应用**不能**请求改尺寸：真实终端里 `CSI 8 ; h ; w t` 是那个请求，而 wezterm 明确拒绝它
+（`Window::ResizeWindowCells => "We don't allow the application to change the window size"`
+—— `wezterm/term/src/terminalstate/mod.rs`）。我们与它一致，所以不为此加消息。
 """
 
 from __future__ import annotations
@@ -28,6 +34,16 @@ from . import PROTOCOL_VERSION
 #: 同一个操作在两个入口上用不同的校验，只会得到「REST 拒了、WS 收了」这种查不出来的分歧。
 #: 名字会随 `sessions` 广播给所有客户端，所以它的上界是协议的一部分，不是 UI 的偏好。
 SESSION_NAME_MAX = 64
+
+#: 终端尺寸的合法区间。定义在**协议层**，因为它是协议的一部分，不是 UI 的偏好：
+#:
+#: - 下限来自客户端的能力：xterm.js 把 `resize(1,1)` 钳成 `2×1`
+#:   （`MINIMUM_COLS=2` / `MINIMUM_ROWS=1`，实测）。服务端若允许更小，
+#:   就会出现「服务端以为 1 列、客户端画出 2 列」这种**静默**不一致。
+#: - 上限与 `config.Settings` 的 `cols`/`rows` 同源（创建时的初值也用这两个数）。
+SESSION_COLS_MIN = 2
+SESSION_ROWS_MIN = 1
+SESSION_SIZE_MAX = 1000
 
 
 class MessageError(ValueError):
@@ -132,6 +148,19 @@ class SessionRename(_Msg):
     name: str = Field(min_length=1, max_length=SESSION_NAME_MAX)
 
 
+class SessionResize(_Msg):
+    """请求变更会话尺寸（列 / 行）。
+
+    尺寸是**会话级**属性：改完之后该会话的所有客户端一起变（见 `docs/architecture.md` §4）。
+    这里**没有**浏览器可视面积的位置——网格与窗口大小无关，字号才是因变量。
+    """
+
+    t: Literal["session.resize"] = "session.resize"
+    session: str
+    cols: int = Field(ge=SESSION_COLS_MIN, le=SESSION_SIZE_MAX)
+    rows: int = Field(ge=SESSION_ROWS_MIN, le=SESSION_SIZE_MAX)
+
+
 # --------------------------------------------------------------- S → C
 
 
@@ -164,6 +193,24 @@ class Attached(_Msg):
     scrollback: int
     offset: int
     resumed: bool
+
+
+class Resized(_Msg):
+    """会话尺寸已变更（下行）。
+
+    **它在流里的位置是有意义的**：服务端保证这个客户端**先**拿到「按旧尺寸产生的全部
+    字节」、**再**拿到这一条、之后才是新尺寸的字节（见 `service/hub.py` 的
+    `_push_client` 与 `Client.pending_resizes`）。客户端据此 `term.resize(cols, rows)`。
+
+    不附带任何重绘字节：客户端的终端本来就会在 resize 时按新宽度重排自己的缓冲
+    （xterm.js 的 reflow），服务端不需要替它重建画面。真正的重建路径只有一条——
+    日志被裁剪后的 `SNAPSHOT`。
+    """
+
+    t: Literal["resized"] = "resized"
+    session: str
+    cols: int
+    rows: int
 
 
 class Meta(_Msg):
@@ -244,11 +291,12 @@ ClientMessage: TypeAlias = Annotated[
     | SessionCreate
     | SessionList
     | SessionClose
-    | SessionRename,
+    | SessionRename
+    | SessionResize,
     Field(discriminator="t"),
 ]
 ServerMessage: TypeAlias = Annotated[
-    HelloOk | Attached | Meta | Exited | Sessions | Behind | InputHold | Failure,
+    HelloOk | Attached | Resized | Meta | Exited | Sessions | Behind | InputHold | Failure,
     Field(discriminator="t"),
 ]
 
@@ -335,6 +383,7 @@ def server_message_shapes() -> dict[str, dict[str, str]]:
     models: tuple[tuple[str, type[BaseModel]], ...] = (
         ("hello_ok", HelloOk),
         ("attached", Attached),
+        ("resized", Resized),
         ("meta", Meta),
         ("exited", Exited),
         ("sessions", Sessions),
@@ -350,7 +399,10 @@ def server_message_shapes() -> dict[str, dict[str, str]]:
 
 __all__ = [
     "PROTOCOL_VERSION",
+    "SESSION_COLS_MIN",
     "SESSION_NAME_MAX",
+    "SESSION_ROWS_MIN",
+    "SESSION_SIZE_MAX",
     "Ack",
     "Attach",
     "Attached",
@@ -365,6 +417,7 @@ __all__ = [
     "InputHold",
     "MessageError",
     "Meta",
+    "Resized",
     "Resync",
     "ServerMessage",
     "SessionClose",
@@ -372,6 +425,7 @@ __all__ = [
     "SessionInfo",
     "SessionList",
     "SessionRename",
+    "SessionResize",
     "SessionStatus",
     "Sessions",
     "dump",

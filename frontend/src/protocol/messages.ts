@@ -57,6 +57,24 @@ export interface Attached {
   readonly resumed: boolean;
 }
 
+/**
+ * 会话尺寸已变更（下行）。
+ *
+ * **它在流里的位置是有意义的**：服务端保证本端先收到「按旧尺寸产生的全部字节」、再收到
+ * 这一条、之后才是新尺寸的字节（服务端的 `Client.pending_resizes` + `_push_client` 保证）。
+ * 所以收到它就照做——`term.resize(cols, rows)`，再重跑字号求解。
+ *
+ * 消息本身不携带任何重绘字节：xterm 会在 resize 时按新宽度重排自己的缓冲区（这是它内置的
+ * reflow，见 `app.ts` 里 `windowsPty` 的注释）。真正的重建路径只有一条——日志被裁剪后的
+ * `SNAPSHOT`。
+ */
+export interface Resized {
+  readonly t: 'resized';
+  readonly session: string;
+  readonly cols: number;
+  readonly rows: number;
+}
+
 export interface Meta {
   readonly t: 'meta';
   readonly session: string;
@@ -113,6 +131,7 @@ export interface InputHold {
 export type ServerMessage =
   | HelloOk
   | Attached
+  | Resized
   | Meta
   | Exited
   | Sessions
@@ -124,6 +143,7 @@ export type ServerMessage =
 export const SERVER_MESSAGE_TYPES = [
   'hello_ok',
   'attached',
+  'resized',
   'meta',
   'exited',
   'sessions',
@@ -144,6 +164,7 @@ export const CLIENT_MESSAGE_TYPES = [
   'session.list',
   'session.close',
   'session.rename',
+  'session.resize',
 ] as const;
 
 // --------------------------------------------------------------- 校验
@@ -191,6 +212,11 @@ export const SHAPES: Readonly<Record<string, Shape>> = {
     scrollback: 'int',
     offset: 'int',
     resumed: 'bool',
+  },
+  resized: {
+    session: 'str',
+    cols: 'int',
+    rows: 'int',
   },
   meta: {
     session: 'str',
@@ -337,4 +363,15 @@ export function sessionClose(session: string): string {
 
 export function sessionRename(session: string, name: string): string {
   return JSON.stringify({ t: 'session.rename', session, name });
+}
+
+/**
+ * 请求变更会话尺寸。
+ *
+ * 边界（`SESSION_COLS_MIN` / `SESSION_ROWS_MIN` / `SESSION_SIZE_MAX`）**不在这里重复一遍**：
+ * 那是协议侧的事实，前端抄一份只会多一个会漂移的常量（与 `session.rename` 的名字长度同一个道理）。
+ * 越界由服务端拒回，而那条消息本来就会显示成提示（见 `app.ts` 的 `error` 分支）。
+ */
+export function sessionResize(session: string, cols: number, rows: number): string {
+  return JSON.stringify({ t: 'session.resize', session, cols, rows });
 }

@@ -69,6 +69,12 @@ class FakePty:
     def write(self, data: bytes) -> None:
         self._calls.append("pty.write")
 
+    def resize(self, cols: int, rows: int) -> None:
+        # `PyweztermHost.resize` 会调它（底层是 ResizePseudoConsole）。本文件不测改尺寸，
+        # 但替身要与真 `Pty` 的方法面同形——少了它，日后在这里加一条带 resize 的用例
+        # 会以 AttributeError 失败，看起来像产品缺陷。
+        self._calls.append(f"pty.resize:{cols}x{rows}")
+
     def kill(self) -> None:
         self._calls.append("pty.kill")
 

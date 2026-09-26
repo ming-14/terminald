@@ -33,6 +33,32 @@ from terminald.service.hub import Hub
 #: 子进程输出里用作同步点的标记
 MARKER = "TERMD_CONTRACT_OK"
 
+#: 子进程：周期性报告**自己的**终端尺寸。
+#:
+#: Windows 没有 SIGWINCH，所以只能自己轮询；用 `os.get_terminal_size` 是为了两个平台
+#: 走各自正确的系统调用（Windows：`GetConsoleScreenBufferInfo` 的窗口矩形；POSIX：
+#: `TIOCGWINSZ`），而不是靠环境变量猜。输出必须带 CRLF —— ConPTY 下不带换行的整段输出会丢。
+_SIZE_WATCH_CODE = (
+    "import os, sys, time\n"
+    "def size():\n"
+    "    try:\n"
+    "        s = os.get_terminal_size(sys.stdout.fileno())\n"
+    "    except OSError:\n"
+    "        return (-1, -1)\n"
+    "    return (s.columns, s.lines)\n"
+    "def w(text):\n"
+    "    sys.stdout.buffer.write(text.encode() + b'\\r\\n')\n"
+    "    sys.stdout.buffer.flush()\n"
+    "last = None\n"
+    "deadline = time.time() + 20\n"
+    "while time.time() < deadline:\n"
+    "    cur = size()\n"
+    "    if cur != last:\n"
+    "        w('TERMD_SIZE=%dx%d' % cur)\n"
+    "        last = cur\n"
+    "    time.sleep(0.05)\n"
+)
+
 #: 采集超时：真实 ConPTY 启动 + 退出通常 < 2s，留足余量
 _TIMEOUT = 30.0
 
@@ -478,6 +504,55 @@ async def test_rebuild_after_trim_has_no_hole_and_no_overlap() -> None:
         by_rebuild.feed(stream)
         assert by_rebuild.text().rstrip() == by_bytes.text().rstrip(), (
             f"重建画面与字节真源不一致:\nrebuild={by_rebuild.text()!r}\nbytes={by_bytes.text()!r}"
+        )
+    finally:
+        await hub.stop()
+
+
+# --------------------------------------------------------------- 改尺寸
+
+
+async def _wait_for_stream(endpoint: Endpoint, needle: bytes, timeout: float = _TIMEOUT) -> None:
+    """反复排空，直到该客户端收到的字节里出现 `needle`（真实宿主上确实要等）。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        endpoint.drain_until_quiet(rounds=32)
+        if needle in endpoint.stream:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"{timeout}s 内没有在输出里看到 {needle!r}")
+
+
+async def test_resize_reaches_the_child_process() -> None:
+    """改尺寸必须真的传到**子进程**：它自己报出新尺寸。
+
+    这是整个功能的地基。`Pty.resize` 调了、模型也 rewrap 了，但子进程没收到新尺寸的话，
+    应用（vim / htop / 任何按宽度排版的东西）会继续按旧宽度画——用户看到的就是"尺寸没改"。
+    所以这里断言的是**子进程的读数**，不是我们自己记下的那个数字（那个数字只证明我们"以为"
+    改了）。
+
+    顺带钉住模型与日志同源这条不变量在 resize 之后仍然成立：宿主会因为 resize 往输出流里
+    吐一段整屏重绘（`docs/resize-plan.md` §3.1），它必须与普通输出一样**原子地**并入日志。
+    """
+    settings = make_settings(
+        host_impl="pywezterm",
+        shell=[sys.executable, "-c", _SIZE_WATCH_CODE],
+    )
+    hub = Hub(settings, make_host_factory("pywezterm"))
+    try:
+        info = await hub.create_session()
+        endpoint = await _attach(hub, info.id, "c1")
+        await _wait_for_stream(endpoint, b"TERMD_SIZE=80x24")
+
+        session = hub.get_session(info.id)
+        assert session.host is not None
+        hub.resize_session(info.id, 100, 30)
+
+        await _wait_for_stream(endpoint, b"TERMD_SIZE=100x30")
+        assert [m.cols for m in endpoint.control_of("resized")] == [100]
+        assert (session.cols, session.rows) == (100, 30)
+        assert session.host.fed_offset == session.journal.end_offset, (
+            "resize 之后模型与日志不同源了：宿主的重绘字节必须与普通输出一样并入日志"
         )
     finally:
         await hub.stop()

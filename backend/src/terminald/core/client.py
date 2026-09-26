@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from dataclasses import dataclass, field
 
 from .outbox import Outbox
@@ -46,6 +47,20 @@ class Client:
     #: 这是**每客户端**的状态，而不是每会话：同一个会话的多个客户端里，只有真正把
     #: 写队列灌满的那一个需要在本端排队（其他人没发东西，凭什么让他们停）。
     input_held: bool = False
+    #: 待下发的尺寸变更，按 offset 升序：每项 `(offset, cols, rows)`，`offset` 是**变更
+    #: 发生时日志的末尾**。
+    #:
+    #: 为什么不在这里直接发：`_push_client` 只把字节推到窗口允许的位置，此刻该客户端
+    #: 可能还有一批**按旧尺寸产生**的字节没拿到。尺寸消息若插在它们前面，客户端就会
+    #: 「先改尺寸、再收到旧尺寸的字节」——那是顺序错误，不是可以靠重排兜住的偏差。
+    #: 因此只登记变更点，由 `_push_client` 在游标**越过** `offset`（即 `offset` 之前的
+    #: 字节都已交给 socket）时按序下发。
+    #:
+    #: 为什么是队列而不是"只留最新一条"：只留最新会把中间那次尺寸丢掉，客户端虽然能收敛
+    #: 到最终尺寸，却会在中途用**更新**的尺寸去解释一批按**更旧**尺寸产生的字节。留着
+    #: 全部条目就没有这个洞，而条目数只与"该客户端落后期间发生了几次改尺寸"成正比。
+    #: （用 `deque` 而不是 `list`：取队头是每次推送都会走的路，`list.pop(0)` 是 O(n)。）
+    pending_resizes: deque[tuple[int, int, int]] = field(default_factory=deque)
     closed: bool = False
     #: 自述信息（仅用于列表展示/日志）
     label: str = ""
@@ -67,11 +82,13 @@ class Client:
         """解除订阅：本端与上一个会话相关的所有状态一起清掉。
 
         输入暂缓必须清：它描述的是**上一个会话**的写队列，留着会让新会话的输入
-        被无声地按旧状态处理。
+        被无声地按旧状态处理。尺寸变更同理——它是上一个会话的尺寸，新订阅会从
+        `attached` 拿到当前尺寸。
         """
         self.session_id = None
         self.next_push_offset = 0
         self.input_held = False
+        self.pending_resizes.clear()
         self.reset_ack(0)
 
 
