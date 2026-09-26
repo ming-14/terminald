@@ -9,9 +9,9 @@
 
 | 部分 | 状态 |
 |---|---|
-| `backend/` | 已完成。`ruff` + `ruff format` + `mypy --strict` + `pytest` 四道全绿（261 通过 + 32 个真实宿主契约测试） |
-| `frontend/` | 已完成。`tsc --strict` + 117 个 vitest + 八个真实浏览器探针（共 107 项断言）全通过 |
-| `docs/` | `architecture.md`、`protocol.md`、`design/frontend-draft.html`、`audit.md`（四轮审计报告：产品缺陷 A1–A13、验证层缺陷 V1–V6、交付前清理 C1–C9、测试同步纪律 D1–D7）已就位 |
+| `backend/` | 已完成。`ruff` + `ruff format` + `mypy --strict` + `pytest` 四道全绿（345 通过 + 33 个真实宿主契约测试） |
+| `frontend/` | 已完成。`tsc --strict` + 134 个 vitest + 九个真实浏览器探针（共 135 项断言）全通过 |
+| `docs/` | `architecture.md`、`protocol.md`、`design/frontend-draft.html`、`audit.md`（四轮审计报告：产品缺陷 A1–A13、验证层缺陷 V1–V6、交付前清理 C1–C9、测试同步纪律 D1–D7）、`resize-plan.md`（改尺寸的调研与落地）已就位 |
 | `vendor/` | 长期依赖已就位：`vendor/pywezterm/`（pywezterm 的包目录，**不安装**，由程序自己定位，不需要 `PYTHONPATH`） |
 
 后端已验证到「真实 ConPTY 子进程 → 输出字节 → WS 客户端 → 浏览器渲染」的完整往返；
@@ -51,6 +51,9 @@ cd ../backend
 ```
 
 打开 <http://127.0.0.1:8765/>，点侧栏标题栏右侧的 `+` 新建一个会话。接口文档在 `/api/docs`。
+
+顶栏右侧显示当前网格（例如 `120×30`），**点它可以改尺寸**（预设档位或手输列/行）；
+改的是会话属性，所以同一个会话的所有客户端一起变。细节见 `docs/resize-plan.md`。
 
 ```bash
 # 后端测试

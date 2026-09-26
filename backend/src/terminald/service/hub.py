@@ -79,6 +79,7 @@ from ..protocol.messages import (
     Hello,
     InputHold,
     Meta,
+    Resized,
     Resync,
     ServerMessage,
     SessionClose,
@@ -86,6 +87,7 @@ from ..protocol.messages import (
     SessionInfo,
     SessionList,
     SessionRename,
+    SessionResize,
     Sessions,
     SessionStatus,
     dump_bytes,
@@ -259,6 +261,8 @@ class Hub:
                     await self._on_session_close(client, message)
                 case SessionRename():
                     self._on_session_rename(client, message)
+                case SessionResize():
+                    self.resize_session(message.session, message.cols, message.rows)
         except TerminaldError as exc:
             # 给客户端的是 `code` 与**面向使用者**的文案；技术细节（`str(exc)`）只进日志，
             # 那里才是偏移数字、会话 id 这类东西该待的地方。
@@ -347,6 +351,37 @@ class Hub:
         self._publish_sessions()
         await self._release_session(detached)
 
+    def resize_session(self, session_id: str, cols: int, rows: int) -> None:
+        """改会话尺寸。**同步、无 await**，因此是原子临界区。
+
+        顺序是强制的：
+
+        1. 先改宿主（PTY + 模型）——尺寸这件事的真源，它失败就不该对外声称改了；
+        2. 再改会话的 `cols`/`rows`（`info()` 与 `attached` 都读这两个字段）；
+        3. 最后给每个订阅者**登记变更点**，由 `_push_client` 在游标越过它时下发
+           `resized`。**不能在这里直接 `_send`**：那会插到该客户端尚未拿到的旧尺寸
+           字节前面（见 `core/client.py` 的 `pending_resizes`）。
+
+        尺寸是从**终端侧**改的（`cols`/`rows` 仍是服务端属性），前端只是发起方；
+        浏览器可视面积不参与，这是「多客户端不会有尺寸分歧」的前提。
+
+        同尺寸是幂等的：不发消息、也不碰宿主——一次无谓的 PTY resize 会白白引出宿主
+        那一段整屏重绘（`docs/resize-plan.md` §3.1）。
+        """
+        session = self._registry.get(session_id)
+        if session.cols == cols and session.rows == rows:
+            return
+        if session.host is not None:
+            session.host.resize(cols, rows)
+        session.resize(cols, rows)
+        offset = session.journal.end_offset
+        for client in session.subscribers:
+            client.pending_resizes.append((offset, cols, rows))
+            # 游标可能已经越过变更点（客户端本来就是同步的）——那就立刻下发
+            self._flush_pending_resize(session, client)
+        _log.info("会话尺寸已变更 id=%s -> %dx%d", session.id, cols, rows)
+        self._publish_sessions()
+
     # ============================================================ 内部：订阅
 
     def _on_attach(self, client: Client, message: Attach) -> None:
@@ -400,6 +435,9 @@ class Hub:
             self._push_snapshot(client, session, alignment)
         client.next_push_offset = rebuild_from
         client.reset_ack(alignment)
+        # `attached` 交付的就是**当前**尺寸，因此它取代了此前登记的每一次尺寸变更：
+        # 留着它们只会在客户端已经按当前尺寸重排之后，再发一条多余的 `resized`。
+        client.pending_resizes.clear()
         if resumed:
             # 从游标补齐到 end；队列满就下次继续，绝不丢字节
             self._push_client(session, client)
@@ -445,6 +483,8 @@ class Hub:
         self._push_snapshot(client, session, alignment)
         client.next_push_offset = alignment
         client.reset_ack(alignment)
+        # 同 `_attach`：重建交付的是当前尺寸，之前登记的变更点全部作废
+        client.pending_resizes.clear()
 
     def _on_ack(self, client: Client, message: Ack) -> None:
         """客户端报告「已渲染到 offset」。
@@ -555,8 +595,27 @@ class Hub:
             client.outbox.push(frame)
             cursor += len(data)
         client.next_push_offset = cursor
+        # 游标越过变更点之后才发尺寸变更：这样它在 outbox 里必然排在那批"按旧尺寸
+        # 产生的字节"之后（出站是 FIFO，顺序即保证）
+        self._flush_pending_resize(session, client)
         if client.outbox.pending_bytes:
             client.wakeup.set()
+
+    def _flush_pending_resize(self, session: Session, client: Client) -> None:
+        """把**游标已越过**的尺寸变更按序下发给该客户端。
+
+        "游标已越过"就是判据：`next_push_offset` 是"已经交给 socket 的字节数"，所以
+        `offset <= next_push_offset` 意味着该变更点之前的字节都已在队列里排在它前面。
+        反过来，游标还没到就发（或干脆在 `resize_session` 里直接发）会让客户端先拿到
+        新尺寸、再拿到旧尺寸的字节。
+
+        一次可能发多条（客户端落后期间改了好几次尺寸）：每一条都必须发，否则它会在
+        中途用更新（或更旧）的尺寸去解释一批字节。
+        """
+        pending = client.pending_resizes
+        while pending and pending[0][0] <= client.next_push_offset:
+            _offset, cols, rows = pending.popleft()
+            self._send(client, Resized(session=session.id, cols=cols, rows=rows))
 
     def _release_input(self, session_id: str) -> None:
         """输入队列已排水：放行该会话下被暂缓的客户端。**只允许事件循环调用。**

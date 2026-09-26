@@ -25,6 +25,7 @@ const PROBES = [
   'multi-client',
   'scrollback',
   'remember',
+  'resize',
   'input-hold',
   'shortcuts',
   'conpty-modes',

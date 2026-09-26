@@ -23,6 +23,7 @@ import {
   sessionClose,
   sessionCreate,
   sessionRename,
+  sessionResize,
   type ServerMessage,
   type SessionInfo,
 } from '../protocol/messages.js';
@@ -31,6 +32,7 @@ import { isPlausibleCellAspect, measureCellAspect } from '../render/size.js';
 import { el, replace, setText } from './dom.js';
 import { SessionMemory, pickInitialSession } from './remember.js';
 import { Shortcuts } from './shortcuts.js';
+import { SIZE_PRESETS, parseSizeInput, sizeChipState } from './size-control.js';
 
 /**
  * xterm.js 在焦点上报模式（DECSET 1004）下自己生成的两个序列；服务端也会写一份，故滤掉。
@@ -102,7 +104,8 @@ export class App {
   readonly #footCount: HTMLSpanElement;
   readonly #titleNode: HTMLSpanElement;
   readonly #cwdNode: HTMLSpanElement;
-  readonly #chipSize: HTMLSpanElement;
+  /** 当前网格尺寸。它同时是**改尺寸的入口**（点它开弹层），所以是个按钮而不是展示块。 */
+  readonly #chipSize: HTMLButtonElement;
   readonly #chipFont: HTMLSpanElement;
   readonly #chipConn: HTMLSpanElement;
   readonly #chipClients: HTMLSpanElement;
@@ -124,6 +127,11 @@ export class App {
   #connection: ConnectionState = 'idle';
   #resizeObserver: ResizeObserver | null = null;
   #fitHandle: number | null = null;
+  /** 尺寸弹层（点开才建，同时最多一个）与其输入框。 */
+  #sizePop: HTMLDivElement | null = null;
+  #sizeInputs: { readonly cols: HTMLInputElement; readonly rows: HTMLInputElement } | null = null;
+  /** 弹层的拆除动作（移除 document 上的外层监听）。关掉时必须逐个执行，否则会越挂越多。 */
+  #sizePopDisposers: (() => void)[] = [];
 
   /** 本标签页的位置记忆：当前会话 + 各会话的滚动行。 */
   readonly #memory: SessionMemory;
@@ -164,7 +172,19 @@ export class App {
     this.#titleNode = el('span', { class: 'title', text: '未选择会话' });
     this.#cwdNode = el('span', { class: 'cwd', text: '' });
     const chips = el('div', { class: 'chips' });
-    this.#chipSize = el('span', { class: 'chip mono', text: '—' });
+    // 尺寸 chip 是**可点的**：它是改尺寸的入口（见 `#toggleSizePop`）。做成按钮而不是
+    // 展示块，是因为它本来就在顶栏、显示的就是要改的那个值——入口与状态同一处，
+    // 不用再找一遍。
+    this.#chipSize = el('button', {
+      class: 'chip mono size-chip',
+      text: '—',
+      title: '更改终端尺寸',
+    });
+    this.#chipSize.addEventListener('click', (event) => {
+      // 别让 document 上的"点外面就关"在这一下之后立刻把它关掉
+      event.stopPropagation();
+      this.#toggleSizePop();
+    });
     this.#chipFont = el('span', { class: 'chip mono', text: '—' });
     this.#chipConn = el('span', { class: 'chip', text: '连接中' });
     this.#chipClients = el('span', { class: 'chip', text: '0 客户端' });
@@ -206,6 +226,12 @@ export class App {
       cursorBlink: true,
       // 前后端同机（后端只监听回环），所以浏览器的 OS 就是服务端的 OS。
       // 不设它的话 ConPTY 下的滚动历史会被 xterm 的启发式规则算错。
+      //
+      // ⚠ **别给它补 `buildNumber`**：xterm 的重排（reflow）开关就挂在这里——
+      // `windowsPty.buildNumber ? (backend==='conpty' && buildNumber>=21376) : (!windowsMode)`。
+      // 只给 backend 时走第二分支 ⇒ **重排是开着的**，改尺寸后 xterm 自己会把缓冲区按新宽度
+      // 重排；补上 buildNumber 且小于 21376 就会把重排**关掉**，那时改尺寸后的画面只能靠
+      // 宿主吐出来的重绘字节撑着。这条是实测得来的（docs/resize-plan.md §2.2）。
       windowsPty: { backend: 'conpty' },
       linkHandler: {
         // 终端输出是不可信输入：只放行 http(s)，且必须按住修饰键才打开
@@ -390,6 +416,31 @@ export class App {
         break;
       }
 
+      case 'resized': {
+        // 尺寸是**会话属性**：同一个会话的所有客户端都会收到这条（见 docs/resize-plan.md §4）。
+        // 本端要做的只有两件：记住新的网格、把字号重解一遍。
+        //
+        // **不重绘、不补齐任何字节**：xterm 会在 `term.resize` 时按新宽度重排自己的缓冲区
+        // （它内置的 reflow 在 `windowsPty` 只给了 backend 时是开着的，见构造函数里的注释）。
+        // 真实的 Windows 宿主会在这时往输出流里吐一段整屏重绘，那段字节和普通输出一样
+        // 走 `onOutput` 进来——这里刻意不为它做什么，理由见 docs/resize-plan.md §5 决策 3。
+        if (message.session !== this.#activeSession) break;
+        this.#canonicalSize = { cols: message.cols, rows: message.rows };
+        this.#fit();
+        // 改尺寸会 reflow 缓冲区 —— **行号会变**，而位置记忆记的正是行号（见 remember.ts）。
+        // 重新记一次，让它跟着新的布局走；不记的话会有两种坏结果（都实测过，见
+        // docs/resize-plan.md §4.4 与 probe/resize.mjs）：
+        //
+        // - 缓冲区变长（折行变多）时，记下的行号悄悄指向**别的内容**，刷新会落在另一处；
+        // - 缓冲区变短时，记下的行号可能越过新的上界，`#restoreScroll` 的"超出上界就不动"
+        //   会直接跳过，于是位置静默丢失（刷新落到最底部）。
+        //
+        // 记的是 xterm 自己 reflow 之后的位置，也就是**live 客户端此刻看到的那一处**——
+        // 这正是要保证的：刷新后的落点与没刷新的那个客户端一致。
+        this.#rememberScroll();
+        break;
+      }
+
       case 'meta': {
         const session = this.#sessions.find((item) => item.id === message.session);
         if (session !== undefined) {
@@ -526,6 +577,10 @@ export class App {
     }
 
     setText(this.#footCount, `${this.#sessions.length} 个会话`);
+    // 尺寸 chip 的可点状态取决于**当前会话的状态**（已退出就不能改），而会话状态就是在
+    // 这里更新的（`sessions` 消息）。放在这里而不是只在 `#fit()` 里：否则"正在看的那个
+    // 会话自己退出了"这条路径不会置灰——它不触发 `attached`，也就不会走到 `#fit()`。
+    this.#renderSizeChip();
   }
 
   #createCard(info: SessionInfo): SessionCard {
@@ -685,6 +740,133 @@ export class App {
 
   // ------------------------------------------------------------ 尺寸
 
+  /** 当前会话在列表里的条目（未订阅、或已被删掉时为 null）。 */
+  #activeInfo(): SessionInfo | null {
+    if (this.#activeSession === null) return null;
+    return this.#sessions.find((item) => item.id === this.#activeSession) ?? null;
+  }
+
+  /**
+   * 顶栏那个尺寸 chip：显示当前网格，同时兼任**改尺寸的入口**。
+   *
+   * 显示的值恒来自服务端（`attached` / `resized` 交付，存在 `#canonicalSize`），
+   * 不是本端提交后自己写上去的——不做乐观更新，理由见 `#requestResize`。
+   *
+   * 已退出的会话不可改：尺寸要落到 PTY 上才有意义（进程都没了）。这里置灰按钮，
+   * 而不是在提交后靠服务端报错兜住——用户没必要为一个不可能的操作先点一下再被告知。
+   */
+  #renderSizeChip(): void {
+    const state = sizeChipState(this.#canonicalSize, this.#activeInfo()?.status ?? null);
+    setText(this.#chipSize, state.text);
+    this.#chipSize.disabled = state.disabled;
+    this.#chipSize.title = state.title;
+  }
+
+  /** 开关尺寸弹层（同时最多一个）。 */
+  #toggleSizePop(): void {
+    if (this.#sizePop !== null) {
+      this.#closeSizePop();
+      return;
+    }
+    const info = this.#activeInfo();
+    if (info === null || info.status !== 'running') return;
+
+    const pop = el('div', { class: 'size-pop' });
+    // 弹层内部点一下不该触发 document 上那条"点外面就关"
+    pop.addEventListener('click', (event) => event.stopPropagation());
+    pop.appendChild(el('div', { class: 'size-pop-title', text: '宽 × 高（列 / 行）' }));
+
+    for (const [cols, rows] of SIZE_PRESETS) {
+      const current = cols === info.cols && rows === info.rows;
+      const item = el('button', {
+        class: current ? 'size-item current' : 'size-item',
+        text: `${current ? '●' : '○'}  ${cols} × ${rows}`,
+      });
+      item.addEventListener('click', () => this.#requestResize(cols, rows));
+      pop.appendChild(item);
+    }
+
+    pop.appendChild(el('div', { class: 'size-pop-split' }));
+    pop.appendChild(el('div', { class: 'size-pop-label', text: '自定义' }));
+
+    const colsInput = el('input', { class: 'size-input', attrs: { inputmode: 'numeric' } });
+    const rowsInput = el('input', { class: 'size-input', attrs: { inputmode: 'numeric' } });
+    colsInput.value = String(info.cols);
+    rowsInput.value = String(info.rows);
+    const inputs = el('div', {
+      class: 'size-row',
+      children: [colsInput, el('span', { class: 'size-times', text: '×' }), rowsInput],
+    });
+    const submit = el('button', { class: 'size-submit', text: '应用' });
+    submit.addEventListener('click', () => this.#submitSizePop());
+    const footer = el('div', { class: 'size-foot', children: [submit] });
+    pop.append(inputs, footer);
+    // 回车即提交：这是表单最省事的用法，而两个输入框都是数字
+    for (const input of [colsInput, rowsInput]) {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') this.#submitSizePop();
+      });
+    }
+
+    this.#sizeInputs = { cols: colsInput, rows: rowsInput };
+    this.#sizePop = pop;
+    // 挂到 chips 上：`.chips` 是坐标原点（CSS 里 position: relative），于是弹层贴着
+    // chip 的右下角展开，不用在 JS 里算任何位置。
+    this.#chipSize.parentElement?.appendChild(pop);
+
+    // 点别处 / Esc 关掉。用 document 上的监听而不是 chip 的 blur：blur 在点弹层内部时
+    // 也会触发（焦点离开了 chip），会把刚打开的弹层立刻关掉。
+    const onDocumentClick = (): void => this.#closeSizePop();
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') this.#closeSizePop();
+    };
+    document.addEventListener('click', onDocumentClick);
+    document.addEventListener('keydown', onKey);
+    this.#sizePopDisposers = [
+      () => document.removeEventListener('click', onDocumentClick),
+      () => document.removeEventListener('keydown', onKey),
+    ];
+    colsInput.focus();
+    colsInput.select();
+  }
+
+  #closeSizePop(): void {
+    if (this.#sizePop === null) return;
+    this.#sizePop.remove();
+    this.#sizePop = null;
+    this.#sizeInputs = null;
+    for (const dispose of this.#sizePopDisposers) dispose();
+    this.#sizePopDisposers = [];
+  }
+
+  #submitSizePop(): void {
+    const inputs = this.#sizeInputs;
+    if (inputs === null) return;
+    const parsed = parseSizeInput(inputs.cols.value, inputs.rows.value);
+    if (parsed === null) {
+      this.#notify('尺寸要填正整数。');
+      return;
+    }
+    this.#requestResize(parsed.cols, parsed.rows);
+  }
+
+  /**
+   * 提交一次尺寸变更。
+   *
+   * **不做乐观更新**：这里只发请求，chip 上的数字要等服务端的 `resized` 回来才变。
+   * 这条操作真的可能失败（会话恰好被关掉、越界被拒），界面先动就会造出"界面说改了、
+   * 实际没改"的假状态——与 `#select` 里"先读记忆再清屏"是同一个道理。
+   *
+   * 边界**不在这里判**：那是协议层的事实（服务端会用 `error` 拒回，那条消息本来就会
+   * 显示成提示）。前端抄一份只会多一个会漂移的常量，与 `#rename` 对名字长度是同一条纪律。
+   */
+  #requestResize(cols: number, rows: number): void {
+    const info = this.#activeInfo();
+    if (info === null) return;
+    this.#closeSizePop();
+    this.#sendControl(sessionResize(info.id, cols, rows));
+  }
+
   /**
    * 让 `.xterm` 铺满容器、并把网格（`.xterm-screen`）居中。
    *
@@ -745,8 +927,8 @@ export class App {
       measureScreen: () => measureRenderedScreen(this.#term.element),
     });
 
-    setText(this.#chipSize, `${cols}×${rows}`);
     setText(this.#chipFont, formatFontSize(result.layout.fontSize));
+    this.#renderSizeChip();
     // 字号没有下限，容器再小也只是字号变小：网格一定完整铺得进去，无条件走渲染
     this.#notice.classList.add('hidden');
     // 居中要按**实测**的渲染尺寸算，不能按模型算出来的 usedW——两者可能差一两个像素
@@ -784,8 +966,18 @@ export class App {
    */
   debugState(): {
     session: string | null;
+    /** 服务端交付的网格（`attached` / `resized`）。 */
     cols: number | null;
     rows: number | null;
+    /**
+     * xterm **实际生效**的网格。
+     *
+     * 与 `cols`/`rows` 是两份独立的真相：前者是服务端说的，后者是终端自己的。
+     * 它们必须相等（字号求解会把 `term.resize` 调到服务端交付的那个尺寸），
+     * 所以调尺寸的端到端断言要用这一对，而不是只看服务端说的那个数。
+     */
+    termCols: number;
+    termRows: number;
     scrollback: number | undefined;
     fontSize: number | undefined;
     connection: ConnectionState;
@@ -821,6 +1013,8 @@ export class App {
       session: this.#activeSession,
       cols: this.#canonicalSize?.cols ?? null,
       rows: this.#canonicalSize?.rows ?? null,
+      termCols: this.#term.cols,
+      termRows: this.#term.rows,
       scrollback: this.#term.options.scrollback,
       fontSize: this.#term.options.fontSize,
       connection: this.#connection,
@@ -848,6 +1042,7 @@ export class App {
   }
 
   dispose(): void {
+    this.#closeSizePop();
     this.#resizeObserver?.disconnect();
     this.#client.close();
     this.#term.dispose();

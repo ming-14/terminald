@@ -16,7 +16,10 @@ from pydantic import ValidationError
 from terminald.api.schemas import CreateSessionRequest
 from terminald.protocol import PROTOCOL_VERSION, frames
 from terminald.protocol.messages import (
+    SESSION_COLS_MIN,
     SESSION_NAME_MAX,
+    SESSION_ROWS_MIN,
+    SESSION_SIZE_MAX,
     Attach,
     Attached,
     MessageError,
@@ -148,6 +151,7 @@ _CLIENT_MESSAGE_TYPES = frozenset(
         "session.list",
         "session.close",
         "session.rename",
+        "session.resize",
     }
 )
 
@@ -274,19 +278,87 @@ def test_attached_requires_scrollback() -> None:
         )
 
 
-def test_size_messages_do_not_exist_in_either_direction() -> None:
-    """尺寸没有消息面：要么客户端改、要么终端侧改——两边都不存在。
+def test_size_messages_have_exactly_one_shape_and_the_dead_name_stays_dead() -> None:
+    """尺寸变更的消息面：**只有** `session.resize`（上行）与 `resized`（下行）。
 
-    删掉 `sized` 是因为**没有任何代码路径能改 cols/rows**；留着它就只会在协议、前端
-    与文档里各挂一个永不触发的分支（A7）。发现它重新出现，说明有人真的做了改尺寸——
-    那时应该同时补上发送点，而不是只把消息加回来。
+    A7 当初删掉的是 `sized`，理由是"没有任何代码路径能改 cols/rows"。现在那条路径有了
+    （用户经前端显式变更），但**不复活 `sized`**：它当时被删正是因为"加消息却不加发送点"
+    会在协议、前端与文档里各挂一个永不触发的分支。所以这里同时钉两件事：
+
+    - 真正的两条消息能解析、字段齐；
+    - 那个旧名字仍然是未知消息（它重新出现就说明有人绕过新路径又加了一份）。
     """
-    with pytest.raises(MessageError):
-        parse_client_message('{"t": "sized", "session": "s1", "cols": 80, "rows": 24}')
+    parsed = parse_client_message(
+        '{"t": "session.resize", "session": "s1", "cols": 100, "rows": 40}'
+    )
+    assert parsed.t == "session.resize"
+    assert (parsed.cols, parsed.rows) == (100, 40)
+    resized = parse_server_message('{"t": "resized", "session": "s1", "cols": 100, "rows": 40}')
+    assert (resized.cols, resized.rows) == (100, 40)
+
+    for raw in (
+        '{"t": "sized", "session": "s1", "cols": 80, "rows": 24}',
+        '{"t": "bell", "session": "s1"}',
+    ):
+        with pytest.raises(MessageError):
+            parse_client_message(raw)
     with pytest.raises(MessageError):
         parse_server_message('{"t": "sized", "session": "s1", "cols": 80, "rows": 24}')
+
+
+@pytest.mark.parametrize(
+    ("cols", "rows"),
+    [(1, 24), (0, 24), (80, 0), (1001, 24), (80, 1001)],
+    ids=["cols_below_min", "cols_zero", "rows_zero", "cols_above_max", "rows_above_max"],
+)
+def test_resize_rejects_out_of_range_sizes(cols: int, rows: int) -> None:
+    """越界尺寸在**协议层**就被拒，而不是流到宿主那里再说。
+
+    下界 2×1 不是随手取的：xterm.js 把 `resize(1,1)` 钳成 `2×1`（`MINIMUM_COLS=2` /
+    `MINIMUM_ROWS=1`，实测）。服务端若放行更小的值，就会出现"服务端以为 1 列、客户端
+    画出 2 列"这种**静默**不一致——两侧都不报错，只是说的不是同一件事。
+    """
     with pytest.raises(MessageError):
-        parse_server_message('{"t": "bell", "session": "s1"}')
+        parse_client_message(
+            json.dumps({"t": "session.resize", "session": "s1", "cols": cols, "rows": rows})
+        )
+
+
+@pytest.mark.parametrize(("cols", "rows"), [(2, 1), (120, 30), (1000, 1000)])
+def test_resize_accepts_the_boundary_values(cols: int, rows: int) -> None:
+    """边界本身必须是**合法**的——否则上一条可以靠"把区间写窄"轻松通过。"""
+    parsed = parse_client_message(
+        json.dumps({"t": "session.resize", "session": "s1", "cols": cols, "rows": rows})
+    )
+    assert (parsed.cols, parsed.rows) == (cols, rows)
+
+
+def test_resize_and_config_share_one_set_of_bounds() -> None:
+    """创建初值与运行期变更用**同一组**上下界（配置直接引用协议常量）。
+
+    两边各写一份的话会出现"配置允许 1 列、变更接口拒绝 1 列"这类分歧；它只在某个边界值
+    上才暴露，平时看不出来。
+
+    这里用**行为**断言（配置接受到哪、拒绝到哪），而不是去读 pydantic 的约束元数据：
+    后者是实现的表示形式，换个写法就会让测试变成"读属性"而不是"验语义"。
+    """
+    from terminald.config import Settings
+
+    base: dict[str, object] = {"shell": ["x"]}
+
+    def accepts(cols: int, rows: int) -> bool:
+        try:
+            Settings(**{**base, "cols": cols, "rows": rows})  # type: ignore[arg-type]
+        except ValidationError:
+            return False
+        return True
+
+    assert accepts(SESSION_COLS_MIN, SESSION_ROWS_MIN), "协议允许的下界，配置也必须允许"
+    assert accepts(SESSION_SIZE_MAX, SESSION_SIZE_MAX), "协议允许的上界，配置也必须允许"
+    assert not accepts(SESSION_COLS_MIN - 1, SESSION_ROWS_MIN)
+    assert not accepts(SESSION_COLS_MIN, SESSION_ROWS_MIN - 1)
+    assert not accepts(SESSION_SIZE_MAX + 1, 30)
+    assert not accepts(120, SESSION_SIZE_MAX + 1)
 
 
 def test_protocol_version_is_declared() -> None:

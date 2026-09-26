@@ -17,6 +17,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 
 from ..core.ports import HostMetadata, SessionSpec
 
@@ -41,6 +42,8 @@ class FakeHost:
         self.pid: int | None = 4242
         self.written = bytearray()
         self.responses: list[bytes] = []
+        #: 历次 resize 的 `(cols, rows)`，供测试断言"确实改到宿主上了"
+        self.resized: list[tuple[int, int]] = []
         self._queue: deque[bytes] = deque()
         self._lock = threading.Lock()
         self._closed = False
@@ -108,6 +111,20 @@ class FakeHost:
 
     def set_focus(self, focused: bool) -> bytes:
         return b"\x1b[I" if focused else b"\x1b[O"
+
+    def resize(self, cols: int, rows: int) -> None:
+        """改尺寸（测试替身）。
+
+        要点是**同步 `spec`**：`snapshot()` 会按 `spec.cols` 裁可见区，若只记在别处，
+        重建路径就会继续按旧宽度取材——那正是要防的不一致。
+
+        刻意**不**模拟真实宿主随后吐出的那段整屏重绘：那段字节的处置方式是「照原样进
+        输出流」，因此在替身里就是**普通输出**，没有需要区分的特殊路径；真宿主的行为
+        由契约测试守（见 `tests/test_contract_pywezterm.py`）。
+        """
+        with self._lock:
+            self.spec = replace(self.spec, cols=cols, rows=rows)
+            self.resized.append((cols, rows))
 
     def snapshot(self) -> bytes:
         with self._lock:

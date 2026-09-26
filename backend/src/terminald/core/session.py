@@ -74,6 +74,16 @@ class Session:
 
     # ------------------------------------------------------------ 视图
 
+    def resize(self, cols: int, rows: int) -> None:
+        """更新会话尺寸。
+
+        两个字段**必须一起改**：只改一个的话 `info()` 与 `attached` 会报出一个不存在的
+        尺寸，而客户端按它渲染——那是最难查的一类不一致（两侧都"没错"，只是说的不是
+        同一件事）。所以不把 `cols`/`rows` 直接暴露给调用方去分别赋值。
+        """
+        self.cols = cols
+        self.rows = rows
+
     def info(self) -> SessionInfo:
         return SessionInfo(
             id=self.id,

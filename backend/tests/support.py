@@ -143,6 +143,13 @@ class Endpoint:
     control: list[ServerMessage] = field(default_factory=list)
     #: SNAPSHOT 帧的原始负载
     snapshots: list[bytes] = field(default_factory=list)
+    #: **出站顺序**日志：每条负载一项 `(名字, 该项到达时的 next_offset)`——`"output"` 是
+    #: 这批字节的末尾偏移，控制消息则是"收到它时已收到多少输出字节"。
+    #:
+    #: 为什么 `stream` 与 `control` 不够：它们把两类负载分开记账，因此证明不了「谁先谁后」。
+    #: 而有一类断言的全部意义就在顺序上——尺寸变更（`resized`）必须排在该客户端
+    #: **按旧尺寸产生的全部字节**之后（见 `core/client.py` 的 `pending_resizes`）。
+    order: list[tuple[str, int]] = field(default_factory=list)
     #: 下一个期望的 offset
     next_offset: int = 0
 
@@ -154,7 +161,9 @@ class Endpoint:
         """
         for item in self.hub.take_output(self.client_id):
             if not item.binary:
-                self.control.append(parse_server_message(item.payload))
+                message = parse_server_message(item.payload)
+                self.control.append(message)
+                self.order.append((message.t, self.next_offset))
                 continue
             for tag, offset, payload in frames.iter_frames(item.payload):
                 if tag is FrameTag.OUTPUT:
@@ -163,16 +172,28 @@ class Endpoint:
                     )
                     self.stream.extend(payload)
                     self.next_offset = offset + len(payload)
+                    self.order.append(("output", self.next_offset))
                 elif tag is FrameTag.SNAPSHOT:
                     assert offset is not None
                     # 快照取代本地画面：这个客户端之后就是“从 offset 开始”的新生客户端
                     self.snapshots.append(bytes(payload))
                     self.stream.clear()
                     self.next_offset = offset
+                    self.order.append(("snapshot", self.next_offset))
                 else:  # pragma: no cover - 服务端不该给客户端发 INPUT
                     raise AssertionError(f"服务端发出了 {tag!r} 帧")
         if notify:
             self.hub.on_drained(self.client_id)
+
+    def offset_when(self, kind: str) -> int:
+        """该客户端收到第一条 `kind` 消息时，已收到的输出字节数（游标）。
+
+        用于断言顺序：`resized` 到达时游标必须已经越过它被登记的偏移。
+        """
+        for name, offset in self.order:
+            if name == kind:
+                return offset
+        raise AssertionError(f"该客户端没有收到 {kind!r}")
 
     def drain_until_quiet(self, rounds: int = 4) -> None:
         """反复排空直到没有新负载（补流可能因水位上限分多轮）。

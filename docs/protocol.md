@@ -61,15 +61,19 @@ offset 是整个同步机制的坐标：客户端据此上报已确认位置，�
 | `session.list` | — | 请求会话列表 |
 | `session.close` | `session` | 关闭会话 |
 | `session.rename` | `session`、`name` | 重命名 |
+| `session.resize` | `session`、`cols`、`rows` | 变更会话尺寸（列/行）。边界：**列 2..1000、行 1..1000**（`SESSION_COLS_MIN` / `SESSION_ROWS_MIN` / `SESSION_SIZE_MAX`；下限取自客户端的钳位，见 architecture §4.1）。同尺寸幂等（不发任何消息） |
 
-**没有** `resize` / `mouse` / `paste` 三类消息，理由：
+**没有** `mouse` / `paste` 两类消息，理由：
 
-- 无 resize（**两个方向都没有**）：尺寸由终端侧在会话创建时决定（见 architecture §4）。
-  当前没有任何“终端侧改尺寸”的代码路径，所以也没有对应的下行消息——真要加时才加，
-  不留占位面（见 audit.md A7）。
 - 无 mouse：鼠标编码由 xterm.js 依据应用开启的追踪模式完成，结果与键盘一样走 INPUT 帧；
   应用未接管鼠标时由前端本地做选择/链接，服务端无需知情
 - 无 paste：bracketed paste 的包裹由知道该模式的一方（xterm.js）完成，同样落到 INPUT 帧
+
+尺寸**有**消息面（`session.resize` / `resized`），但**创建时**不收尺寸：`cols`/`rows` 仍由
+终端侧（配置）在创建时决定，运行期只由用户经前端显式变更，浏览器可视面积从不参与。
+应用也**不能**请求改尺寸——真实终端里 `CSI 8 ; h ; w t` 是那个请求，而 wezterm 明确拒绝它
+（`Window::ResizeWindowCells => "We don't allow the application to change the window size"`），
+我们与它一致，所以不为此加消息。
 
 ### S → C
 
@@ -77,6 +81,7 @@ offset 是整个同步机制的坐标：客户端据此上报已确认位置，�
 |---|---|---|
 | `hello_ok` | `protocol`、`server` | 握手通过 |
 | `attached` | `session`、`cols`、`rows`、`scrollback`、`offset`、`resumed` | 订阅完成。`cols`/`rows`/`scrollback` 是**终端侧属性**，一并交付；`resumed=true` 表示无损对齐，`false` 表示走了模型快照重建 |
+| `resized` | `session`、`cols`、`rows` | 会话尺寸已变更。**它在流里的位置有意义**：服务端保证它排在该客户端「按旧尺寸产生的最后一批字节」之后、新尺寸的字节之前（见 §3「改尺寸」）。客户端据此 `term.resize(cols, rows)` |
 | `meta` | `session`、`title`、`cwd`、`progress_label`、`progress_value` | 会话元数据（来自终端模型的 OSC 解析） |
 | `exited` | `session`、`code` | 子进程退出（**会话不销毁**） |
 | `sessions` | `items` | 会话列表 |
@@ -226,6 +231,32 @@ input_high_bytes`）：差的不是「大于还是等于」，而是有没有给
 没有这两条，连续输出会把控制面刷爆，或者让前端的状态机凭空多一分不确定性。
 `input_hold` 带 `session` 字段，是因为客户端切换订阅时旧会话的放行**不能**把新会话的输入
 提前倒出去。
+
+### 改尺寸
+
+```
+C: 文本 session.resize{session, cols, rows}
+S: （改 PTY 与终端模型的尺寸）
+S: 文本 resized{session, cols, rows}        ← 必须排在该客户端「旧尺寸的最后一批字节」之后
+```
+
+**顺序是这个操作的语义之一。** 尺寸变化会改变此后每一行的换行位置，所以客户端必须在
+**拿到旧尺寸的全部字节之后**、新尺寸的字节之前改自己的网格。服务端因此不「立刻」下发
+`resized`，只登记变更点（`Client.pending_resizes`），由补齐游标的那段逻辑在**游标越过**
+该点时发出——出站是 FIFO，于是顺序天然成立。
+
+客户端落后期间连改几次尺寸时，**每一条都要下发**（不能只留最新）：只留最新会让客户端
+在中途用更新的尺寸去解释一批按更旧尺寸产生的字节。
+
+另外两条：
+
+- 同尺寸是**幂等**的：不发消息、也不碰宿主（一次无谓的 PTY resize 会引出宿主一整屏重绘）。
+- `attached` 交付的就是**当前**尺寸，因此它取代此前登记的每一次变更——新订阅者与重建路径
+  都不需要额外的 `resized`。
+
+客户端拿到 `resized` 之后只做一件事：改自己的网格（`term.resize`）并按新网格重解字号。
+消息**不携带任何重绘字节**：xterm 会在 resize 时按新宽度重排自己的缓冲区（它内置的
+reflow），真正的重建路径只有一条——日志被裁剪后的 `SNAPSHOT`。
 
 ## 4. 共享测试向量
 
